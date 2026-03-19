@@ -58,7 +58,7 @@ export interface AnthropicRequest {
   stream?: boolean;
 }
 
-export function convertRequest(req: OpenAIChatRequest): AnthropicRequest {
+export function convertRequest(req: OpenAIChatRequest, apiKey?: string): AnthropicRequest {
   const systemMessages = req.messages.filter((m) => m.role === "system");
   const nonSystemMessages = req.messages.filter((m) => m.role !== "system");
 
@@ -71,13 +71,16 @@ export function convertRequest(req: OpenAIChatRequest): AnthropicRequest {
     max_tokens: req.max_tokens || 4096,
   };
 
-  const systemBlocks: Array<{type: string; text: string}> = [
-    {type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude."},
-  ];
+  const systemBlocks: Array<{type: string; text: string}> = [];
+  if (apiKey && apiKey.includes("sk-ant-oat")) {
+    systemBlocks.push({type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude."});
+  }
   for (const m of systemMessages) {
     systemBlocks.push({type: "text", text: m.content});
   }
-  result.system = systemBlocks;
+  if (systemBlocks.length > 0) {
+    result.system = systemBlocks;
+  }
 
   if (req.temperature !== undefined) {
     result.temperature = req.temperature;

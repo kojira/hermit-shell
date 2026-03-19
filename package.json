@@ -1,7 +1,7 @@
 {
-  "name": "claude-proxy",
+  "name": "hermit-shell",
   "version": "1.0.0",
-  "description": "OpenAI-compatible proxy server that forwards requests to Anthropic API",
+  "description": "Hermit Shell: OpenAI-compatible proxy for Anthropic API with OAuth support",
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",

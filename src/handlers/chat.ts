@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { createAnthropicClient } from "../utils/auth";
+import { createAnthropicClient, resolveAuth } from "../utils/auth";
 import {
   convertRequest,
   convertResponse,
@@ -53,7 +53,9 @@ export async function handleChatCompletions(
       return;
     }
 
-    const anthropicReq = convertRequest(body);
+    const auth = resolveAuth();
+    const authToken = "apiKey" in auth ? auth.apiKey : "authToken" in auth ? auth.authToken : undefined;
+    const anthropicReq = convertRequest(body, authToken);
     const requestedModel = body.model;
 
     if (body.stream) {

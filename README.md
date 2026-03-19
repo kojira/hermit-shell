@@ -1,6 +1,6 @@
-# Claude Proxy
+# Hermit Shell
 
-OpenAI-compatible proxy server that forwards requests to the Anthropic API.
+Hermit Shell is an OpenAI-compatible proxy server that forwards requests to the Anthropic API, with OAuth 2025-04-20 support for subscription tokens.
 
 ## Setup
 
