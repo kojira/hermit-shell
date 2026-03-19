@@ -6,15 +6,15 @@ export const MODEL_MAP: Record<string, string> = {
   "gpt-3.5-turbo-0125": "claude-haiku-4-5-20251001",
   "gpt-4o-mini": "claude-haiku-4-5-20251001",
   // GPT-4 class → claude-sonnet (may require higher tier API key)
-  "gpt-4": "claude-sonnet-4-5-20251001",
-  "gpt-4-turbo": "claude-sonnet-4-5-20251001",
-  "gpt-4o": "claude-sonnet-4-5-20251001",
+  "gpt-4": "claude-sonnet-4-5-20250929",
+  "gpt-4-turbo": "claude-sonnet-4-5-20250929",
+  "gpt-4o": "claude-sonnet-4-5-20250929",
   // Direct claude model aliases (pass through or normalize)
   "claude-haiku": "claude-haiku-4-5-20251001",
   "claude-3-haiku": "claude-3-haiku-20240307",
-  "claude-sonnet": "claude-sonnet-4-5-20251001",
-  "claude-3-5-sonnet": "claude-sonnet-4-5-20251001",
-  "claude-sonnet-4-5": "claude-sonnet-4-5-20251001",
+  "claude-sonnet": "claude-sonnet-4-5-20250929",
+  "claude-3-5-sonnet": "claude-sonnet-4-5-20250929",
+  "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
   "claude-opus": "claude-opus-4-5-20251101",
   // Leave claude-* with full version suffix as-is (pass through)
 };
@@ -26,7 +26,7 @@ function hasDateSuffix(model: string): boolean {
 
 export function mapModel(model: string): string {
   if (MODEL_MAP[model]) return MODEL_MAP[model];
-  // Models with date suffix (e.g. claude-sonnet-4-5-20251001) pass through directly
+  // Models with date suffix (e.g. claude-sonnet-4-5-20250929) pass through directly
   if (hasDateSuffix(model)) return model;
   return model;
 }
@@ -51,7 +51,7 @@ export interface OpenAIChatRequest {
 
 export interface AnthropicRequest {
   model: string;
-  system?: string;
+  system?: Array<{type: string; text: string}>;
   messages: AnthropicMessage[];
   max_tokens: number;
   temperature?: number;
@@ -71,9 +71,13 @@ export function convertRequest(req: OpenAIChatRequest): AnthropicRequest {
     max_tokens: req.max_tokens || 4096,
   };
 
-  if (systemMessages.length > 0) {
-    result.system = systemMessages.map((m) => m.content).join("\n\n");
+  const systemBlocks: Array<{type: string; text: string}> = [
+    {type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude."},
+  ];
+  for (const m of systemMessages) {
+    systemBlocks.push({type: "text", text: m.content});
   }
+  result.system = systemBlocks;
 
   if (req.temperature !== undefined) {
     result.temperature = req.temperature;
