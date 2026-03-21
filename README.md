@@ -99,4 +99,4 @@ default = "claude-sonnet-4-5-20251001"
 
 - `src/utils/auth.ts` — 認証解決ロジック
 - `src/handlers/` — リクエストハンドラ
-- モデル変換（MODEL_MAP）は削除済み。モデル名はそのまま Anthropic API に転送される
+- モデル名はそのまま Anthropic API に転送される
