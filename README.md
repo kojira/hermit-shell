@@ -6,6 +6,8 @@
 **hermit-shell** は Anthropic Claude API への OpenAI 互換プロキシサーバーです。  
 `ANTHROPIC_API_KEY` がなくても、macOS キーチェーンに保存された Claude Code の OAuth トークンを使って動作します。
 
+> ⚠️ **現在 macOS 専用** — OAuth トークンの取得に macOS キーチェーン（`security` コマンド）を使用しています。Linux/Windows では `ANTHROPIC_API_KEY` 環境変数による API キー認証のみ利用可能です。
+
 ---
 
 ## 機能
