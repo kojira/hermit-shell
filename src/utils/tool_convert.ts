@@ -29,9 +29,21 @@ export interface OpenAIToolCall {
   };
 }
 
+export interface ContentPartText {
+  type: "text";
+  text: string;
+}
+
+export interface ContentPartImageUrl {
+  type: "image_url";
+  image_url: { url: string };
+}
+
+export type ContentPart = ContentPartText | ContentPartImageUrl;
+
 export interface OpenAIMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content?: string | null;
+  content?: string | ContentPart[] | null;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -157,10 +169,24 @@ export function openaiMessagesToAnthropic(
       });
     } else {
       // user message
-      result.push({
-        role: "user",
-        content: msg.content ?? "",
-      });
+      let anthropicContent: unknown;
+      if (Array.isArray(msg.content)) {
+        // Convert OpenAI ContentParts to Anthropic format
+        anthropicContent = msg.content.map((part: any) => {
+          if (part.type === "text") {
+            return { type: "text", text: part.text };
+          } else if (part.type === "image_url") {
+            return {
+              type: "image",
+              source: { type: "url", url: part.image_url.url }
+            };
+          }
+          return part;
+        });
+      } else {
+        anthropicContent = msg.content ?? "";
+      }
+      result.push({ role: "user", content: anthropicContent as any });
     }
   }
 
