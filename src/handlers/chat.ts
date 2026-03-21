@@ -3,7 +3,6 @@ import { createAnthropicClient, resolveAuth } from "../utils/auth";
 import {
   convertRequest,
   convertResponse,
-  mapModel,
   OpenAIChatRequest,
 } from "../utils/convert";
 import {
@@ -72,7 +71,7 @@ function buildAnthropicRequestWithTools(
   const anthropicTools = openaiToolsToAnthropic(tools);
 
   const req: Record<string, unknown> = {
-    model: mapModel(body.model),
+    model: body.model,
     messages: anthropicMessages,
     max_tokens: body.max_tokens ?? 4096,
     tools: anthropicTools,

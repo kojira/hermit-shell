@@ -1,33 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 
-export const MODEL_MAP: Record<string, string> = {
-  // OpenAI models → Claude haiku (safe default, works with subscription tokens)
-  "gpt-3.5-turbo": "claude-haiku-4-5-20251001",
-  "gpt-3.5-turbo-0125": "claude-haiku-4-5-20251001",
-  "gpt-4o-mini": "claude-haiku-4-5-20251001",
-  // GPT-4 class → claude-sonnet (may require higher tier API key)
-  "gpt-4": "claude-sonnet-4-5-20250929",
-  "gpt-4-turbo": "claude-sonnet-4-5-20250929",
-  "gpt-4o": "claude-sonnet-4-5-20250929",
-  // Direct claude model aliases (pass through or normalize)
-  "claude-haiku": "claude-haiku-4-5-20251001",
-  "claude-3-haiku": "claude-3-haiku-20240307",
-  "claude-sonnet": "claude-sonnet-4-5-20250929",
-  "claude-3-5-sonnet": "claude-sonnet-4-5-20250929",
-  "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
-  "claude-opus": "claude-opus-4-5-20251101",
-  // Leave claude-* with full version suffix as-is (pass through)
-};
-
-/** Check if a model string already has a date suffix and can pass through directly */
-function hasDateSuffix(model: string): boolean {
-  return /\d{8}$/.test(model);
-}
-
 export function mapModel(model: string): string {
-  if (MODEL_MAP[model]) return MODEL_MAP[model];
-  // Models with date suffix (e.g. claude-sonnet-4-5-20250929) pass through directly
-  if (hasDateSuffix(model)) return model;
   return model;
 }
 
