@@ -278,13 +278,12 @@ export function convertResponseWithTools(
       },
     ],
     usage: {
+      ...anthropicResponse.usage,
       prompt_tokens: anthropicResponse.usage?.input_tokens ?? 0,
       completion_tokens: anthropicResponse.usage?.output_tokens ?? 0,
       total_tokens:
         (anthropicResponse.usage?.input_tokens ?? 0) +
         (anthropicResponse.usage?.output_tokens ?? 0),
-      cache_read_input_tokens: anthropicResponse.usage?.cache_read_input_tokens ?? 0,
-      cache_creation_input_tokens: anthropicResponse.usage?.cache_creation_input_tokens ?? 0,
     },
   };
 }
