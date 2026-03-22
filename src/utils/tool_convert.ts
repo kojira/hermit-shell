@@ -275,6 +275,7 @@ export function convertResponseWithTools(
         index: 0,
         message,
         finish_reason: finishReason,
+        stop_sequence: anthropicResponse.stop_sequence ?? null,
       },
     ],
     usage: {

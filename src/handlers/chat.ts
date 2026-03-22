@@ -9,6 +9,7 @@ import {
   initSSE,
   createStreamChunk,
   createInitialChunk,
+  createUsageChunk,
   sendDone,
   createStreamContext,
 } from "../utils/stream";
@@ -127,11 +128,13 @@ export async function handleChatCompletions(
         : undefined;
     const requestedModel = body.model;
 
+    const includeUsage = (body as any).stream_options?.include_usage === true;
+
     if (hasTools(body)) {
       // tools付きリクエスト: tool対応パスを使う
       const anthropicReq = buildAnthropicRequestWithTools(body, authToken);
       if (body.stream) {
-        await handleStreamingWithTools(res, anthropicReq, requestedModel);
+        await handleStreamingWithTools(res, anthropicReq, requestedModel, includeUsage);
       } else {
         await handleNonStreamingWithTools(res, anthropicReq, requestedModel);
       }
@@ -139,7 +142,7 @@ export async function handleChatCompletions(
       // 通常パス: 既存のconvertRequestを使う
       const anthropicReq = convertRequest(body, authToken);
       if (body.stream) {
-        await handleStreaming(res, anthropicReq, requestedModel);
+        await handleStreaming(res, anthropicReq, requestedModel, includeUsage);
       } else {
         await handleNonStreaming(res, anthropicReq, requestedModel);
       }
@@ -189,7 +192,8 @@ async function handleNonStreamingWithTools(
 async function handleStreaming(
   res: Response,
   anthropicReq: any,
-  requestedModel: string
+  requestedModel: string,
+  includeUsage: boolean = false
 ): Promise<void> {
   const { stream: _stream, ...params } = anthropicReq;
   const ctx = createStreamContext(requestedModel);
@@ -203,8 +207,11 @@ async function handleStreaming(
     res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, text));
   });
 
-  stream.on("end", () => {
+  stream.on("finalMessage", (finalMsg: any) => {
     res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, "", "stop"));
+    if (includeUsage && finalMsg.usage) {
+      res.write(createUsageChunk(ctx.id, ctx.model, ctx.created, finalMsg.usage));
+    }
     sendDone(res);
   });
 
@@ -229,7 +236,8 @@ async function handleStreaming(
 async function handleStreamingWithTools(
   res: Response,
   anthropicReq: Record<string, unknown>,
-  requestedModel: string
+  requestedModel: string,
+  includeUsage: boolean = false
 ): Promise<void> {
   const ctx = createStreamContext(requestedModel);
 
@@ -281,6 +289,9 @@ async function handleStreamingWithTools(
       res.write(
         createStreamChunk(ctx.id, ctx.model, ctx.created, "", "stop")
       );
+    }
+    if (includeUsage && finalMsg.usage) {
+      res.write(createUsageChunk(ctx.id, ctx.model, ctx.created, finalMsg.usage));
     }
     sendDone(res);
   });

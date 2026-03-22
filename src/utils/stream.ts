@@ -52,6 +52,30 @@ export function createInitialChunk(
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
+export function createUsageChunk(
+  id: string,
+  model: string,
+  created: number,
+  usage: any
+): string {
+  const inputTokens = usage?.input_tokens ?? 0;
+  const outputTokens = usage?.output_tokens ?? 0;
+  const chunk = {
+    id,
+    object: "chat.completion.chunk",
+    created,
+    model,
+    choices: [],
+    usage: {
+      ...usage,
+      prompt_tokens: inputTokens,
+      completion_tokens: outputTokens,
+      total_tokens: inputTokens + outputTokens,
+    },
+  };
+  return `data: ${JSON.stringify(chunk)}\n\n`;
+}
+
 export function sendDone(res: Response): void {
   res.write("data: [DONE]\n\n");
   res.end();

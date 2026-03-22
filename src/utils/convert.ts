@@ -88,6 +88,7 @@ export function convertResponse(
           content: textContent,
         },
         finish_reason: mapStopReason(anthropicResponse.stop_reason),
+        stop_sequence: anthropicResponse.stop_sequence ?? null,
       },
     ],
     usage: {
