@@ -266,7 +266,12 @@ export function convertResponseWithTools(
   }
 
   return {
+    // 1. Anthropicレスポンス全フィールドスプレッド
+    ...anthropicResponse,
+    // 2. OpenAI互換フィールドで上書き
     id: `chatcmpl-${uuidv4()}`,
+    anthropic_id: anthropicResponse.id,
+    anthropic_model: anthropicResponse.model,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model: requestedModel,
@@ -274,6 +279,7 @@ export function convertResponseWithTools(
       {
         index: 0,
         message,
+        logprobs: null,
         finish_reason: finishReason,
         stop_sequence: anthropicResponse.stop_sequence ?? null,
       },

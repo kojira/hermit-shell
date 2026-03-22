@@ -9,6 +9,7 @@ import {
   initSSE,
   createStreamChunk,
   createInitialChunk,
+  createFinalChunk,
   createUsageChunk,
   sendDone,
   createStreamContext,
@@ -208,7 +209,8 @@ async function handleStreaming(
   });
 
   stream.on("finalMessage", (finalMsg: any) => {
-    res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, "", "stop"));
+    const finishReason = finalMsg.stop_reason === "max_tokens" ? "length" : "stop";
+    res.write(createFinalChunk(ctx.id, ctx.model, ctx.created, finishReason, finalMsg));
     if (includeUsage && finalMsg.usage) {
       res.write(createUsageChunk(ctx.id, ctx.model, ctx.created, finalMsg.usage));
     }
@@ -285,11 +287,12 @@ async function handleStreamingWithTools(
         ],
       });
       res.write(`data: ${delta}\n\n`);
-    } else {
-      res.write(
-        createStreamChunk(ctx.id, ctx.model, ctx.created, "", "stop")
-      );
     }
+    // Anthropicメタデータ付き最終チャンクを送信
+    const finishReason = toolCalls.length > 0 || finalMsg.stop_reason === "tool_use"
+      ? "tool_calls"
+      : finalMsg.stop_reason === "max_tokens" ? "length" : "stop";
+    res.write(createFinalChunk(ctx.id, ctx.model, ctx.created, finishReason, finalMsg));
     if (includeUsage && finalMsg.usage) {
       res.write(createUsageChunk(ctx.id, ctx.model, ctx.created, finalMsg.usage));
     }

@@ -76,6 +76,36 @@ export function createUsageChunk(
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
+export function createFinalChunk(
+  id: string,
+  model: string,
+  created: number,
+  finishReason: string,
+  anthropicMessage: any
+): string {
+  const chunk = {
+    // Anthropicの全フィールドをスプレッド
+    ...anthropicMessage,
+    // OpenAI互換フィールドで上書き
+    id,
+    anthropic_id: anthropicMessage?.id,
+    anthropic_model: anthropicMessage?.model,
+    object: "chat.completion.chunk",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        logprobs: null,
+        finish_reason: finishReason,
+        stop_sequence: anthropicMessage?.stop_sequence ?? null,
+      },
+    ],
+  };
+  return `data: ${JSON.stringify(chunk)}\n\n`;
+}
+
 export function sendDone(res: Response): void {
   res.write("data: [DONE]\n\n");
   res.end();

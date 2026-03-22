@@ -70,13 +70,18 @@ export function convertResponse(
   anthropicResponse: any,
   requestedModel: string
 ) {
-  const textContent = anthropicResponse.content
+  const textContent = (anthropicResponse.content ?? [])
     .filter((c: any) => c.type === "text")
     .map((c: any) => c.text)
     .join("");
 
   return {
+    // 1. まずAnthropicレスポンス全フィールドをスプレッド
+    ...anthropicResponse,
+    // 2. OpenAI互換フィールドで上書き
     id: `chatcmpl-${uuidv4()}`,
+    anthropic_id: anthropicResponse.id,
+    anthropic_model: anthropicResponse.model,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model: requestedModel,
@@ -87,6 +92,7 @@ export function convertResponse(
           role: "assistant",
           content: textContent,
         },
+        logprobs: null,
         finish_reason: mapStopReason(anthropicResponse.stop_reason),
         stop_sequence: anthropicResponse.stop_sequence ?? null,
       },
