@@ -18,6 +18,7 @@ export interface OpenAIFunction {
 export interface OpenAITool {
   type: "function";
   function: OpenAIFunction;
+  cache_control?: object;
 }
 
 export interface OpenAIToolCall {
@@ -85,11 +86,17 @@ export interface AnthropicTextBlock {
  * Convert OpenAI-format tools array to Anthropic tools array.
  */
 export function openaiToolsToAnthropic(tools: OpenAITool[]): AnthropicTool[] {
-  return tools.map((t) => ({
-    name: t.function.name,
-    description: t.function.description,
-    input_schema: t.function.parameters ?? { type: "object", properties: {} },
-  }));
+  return tools.map((t) => {
+    const result: AnthropicTool & { cache_control?: object } = {
+      name: t.function.name,
+      description: t.function.description,
+      input_schema: t.function.parameters ?? { type: "object", properties: {} },
+    };
+    if (t.cache_control) {
+      result.cache_control = t.cache_control;
+    }
+    return result;
+  });
 }
 
 // ---------------------------------------------------------------------------
