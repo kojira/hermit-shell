@@ -17,7 +17,7 @@ import {
 import {
   openaiToolsToAnthropic,
   openaiMessagesToAnthropic,
-  extractSystemPrompt,
+  extractSystemBlocks,
   convertResponseWithTools,
   OpenAITool,
   OpenAIMessage,
@@ -51,20 +51,15 @@ function buildAnthropicRequestWithTools(
   const messages = body.messages as OpenAIMessage[];
   const tools = body.tools as OpenAITool[];
 
-  // systemプロンプトを取り出す
-  const systemText = extractSystemPrompt(messages);
-
   // auth token: oat tokenの場合はClaudeCode system promptを追加
-  const systemBlocks: Array<{ type: string; text: string }> = [];
+  const systemBlocks: Array<Record<string, unknown>> = [];
   if (authToken && authToken.includes("sk-ant-oat")) {
     systemBlocks.push({
       type: "text",
       text: "You are Claude Code, Anthropic's official CLI for Claude.",
     });
   }
-  if (systemText) {
-    systemBlocks.push({ type: "text", text: systemText });
-  }
+  systemBlocks.push(...extractSystemBlocks(messages));
 
   // メッセージ変換（tool role含む）
   const anthropicMessages = openaiMessagesToAnthropic(messages);

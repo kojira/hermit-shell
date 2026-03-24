@@ -33,11 +33,13 @@ export interface OpenAIToolCall {
 export interface ContentPartText {
   type: "text";
   text: string;
+  [key: string]: unknown;
 }
 
 export interface ContentPartImageUrl {
   type: "image_url";
   image_url: { url: string };
+  [key: string]: unknown;
 }
 
 export type ContentPart = ContentPartText | ContentPartImageUrl;
@@ -181,7 +183,7 @@ export function openaiMessagesToAnthropic(
         // Convert OpenAI ContentParts to Anthropic format
         anthropicContent = msg.content.map((part: any) => {
           if (part.type === "text") {
-            return { type: "text", text: part.text };
+            return { ...part, type: "text" };
           } else if (part.type === "image_url") {
             return {
               type: "image",
@@ -207,6 +209,30 @@ export function extractSystemPrompt(messages: OpenAIMessage[]): string | undefin
   const systemMsgs = messages.filter((m) => m.role === "system");
   if (systemMsgs.length === 0) return undefined;
   return systemMsgs.map((m) => m.content ?? "").join("\n");
+}
+
+/**
+ * Extract system prompt as Anthropic system blocks, preserving cache_control and other fields.
+ * Returns array of Anthropic content blocks for the system field.
+ */
+export function extractSystemBlocks(
+  messages: OpenAIMessage[]
+): Array<Record<string, unknown>> {
+  const systemMsgs = messages.filter((m) => m.role === "system");
+  if (systemMsgs.length === 0) return [];
+
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const msg of systemMsgs) {
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        blocks.push({ ...part });
+      }
+    } else if (typeof msg.content === "string" && msg.content) {
+      blocks.push({ type: "text", text: msg.content });
+    }
+  }
+
+  return blocks;
 }
 
 // ---------------------------------------------------------------------------
