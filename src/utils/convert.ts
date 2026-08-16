@@ -4,6 +4,33 @@ export function mapModel(model: string): string {
   return model;
 }
 
+// temperature パラメータを受け付けないモデル。ここが唯一の定義箇所。
+// Opus 5 系は temperature を送ると Anthropic が 400
+// "`temperature` is deprecated for this model." を返す（実測: claude-opus-5）。
+// dated variant (claude-opus-5-YYYYMMDD 等) も同じ family なので前方一致で判定する。
+// haiku / sonnet では temperature は有効なので対象にしない。
+const TEMPERATURE_UNSUPPORTED_PREFIXES = ["claude-opus-5"];
+
+export function modelSupportsTemperature(model: string): boolean {
+  return !TEMPERATURE_UNSUPPORTED_PREFIXES.some((p) => model.startsWith(p));
+}
+
+// 付与すべき temperature を返す。非対応モデルでは undefined を返し、
+// 黙って落とさずログに残す。
+export function resolveTemperature(
+  model: string,
+  temperature: number | undefined
+): number | undefined {
+  if (temperature === undefined) return undefined;
+  if (!modelSupportsTemperature(model)) {
+    console.log(
+      `[hermit-shell] モデル ${model} は temperature 非対応のため除去した (要求値: ${temperature})`
+    );
+    return undefined;
+  }
+  return temperature;
+}
+
 interface OpenAIMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -55,8 +82,9 @@ export function convertRequest(req: OpenAIChatRequest, apiKey?: string): Anthrop
     result.system = systemBlocks;
   }
 
-  if (req.temperature !== undefined) {
-    result.temperature = req.temperature;
+  const temperature = resolveTemperature(result.model, req.temperature);
+  if (temperature !== undefined) {
+    result.temperature = temperature;
   }
 
   if (req.stream !== undefined) {

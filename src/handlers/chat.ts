@@ -3,6 +3,7 @@ import { createAnthropicClient, resolveAuth } from "../utils/auth";
 import {
   convertRequest,
   convertResponse,
+  resolveTemperature,
   OpenAIChatRequest,
 } from "../utils/convert";
 import {
@@ -77,8 +78,9 @@ function buildAnthropicRequestWithTools(
   if (systemBlocks.length > 0) {
     req.system = systemBlocks;
   }
-  if (body.temperature !== undefined) {
-    req.temperature = body.temperature;
+  const temperature = resolveTemperature(body.model, body.temperature);
+  if (temperature !== undefined) {
+    req.temperature = temperature;
   }
 
   return req;
