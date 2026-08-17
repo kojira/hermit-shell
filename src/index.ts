@@ -6,9 +6,6 @@ const PORT = parseInt(process.env.PORT || "8765", 10);
 const AUTH_LABELS: Record<string, string> = {
   "env-api-key": "ANTHROPIC_API_KEY env var (x-api-key)",
   "env-auth-token": "ANTHROPIC_AUTH_TOKEN env var (Bearer)",
-  "openclaw-api-key": "OpenClaw auth-profiles.json (x-api-key)",
-  "openclaw-auth-token": "OpenClaw auth-profiles.json (Bearer/OAuth)",
-  keychain: "macOS keychain OAuth token",
   none: "No auth configured, API calls may fail",
 };
 

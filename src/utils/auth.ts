@@ -1,22 +1,6 @@
-import { readFileSync } from "fs";
-
-const AUTH_PROFILES_PATH =
-  "/Volumes/2TB/openclaw/agents/main/agent/auth-profiles.json";
-
-interface AuthProfiles {
-  version: number;
-  profiles: Record<
-    string,
-    { type: string; provider: string; token: string }
-  >;
-  lastGood: Record<string, string>;
-}
-
 export type AuthResult =
   | { method: "env-api-key"; apiKey: string }
   | { method: "env-auth-token"; authToken: string }
-  | { method: "openclaw-oauth-token"; authToken: string }
-  | { method: "openclaw-api-key"; apiKey: string }
   | { method: "none" };
 
 export function resolveAuth(): AuthResult {
@@ -33,41 +17,7 @@ export function resolveAuth(): AuthResult {
     };
   }
 
-  // 3. OpenClaw auth-profiles.json
-  // OAT tokens (sk-ant-oat01-*) → Bearer auth (authToken) with oauth beta header
-  // Standard API keys (sk-ant-api01-*) → x-api-key header (apiKey)
-  try {
-    const raw = readFileSync(AUTH_PROFILES_PATH, "utf8");
-    const profiles: AuthProfiles = JSON.parse(raw);
-
-    // Helper: resolve a token to the appropriate auth method
-    const resolveToken = (token: string): AuthResult | null => {
-      if (!token) return null;
-      if (token.startsWith("sk-ant-oat01")) {
-        return { method: "openclaw-oauth-token", authToken: token };
-      }
-      return { method: "openclaw-api-key", apiKey: token };
-    };
-
-    // 3a. Try lastGood profile first
-    const lastGoodProfile = profiles.lastGood?.anthropic;
-    if (lastGoodProfile) {
-      const token = profiles.profiles[lastGoodProfile]?.token;
-      const result = resolveToken(token);
-      if (result) return result;
-    }
-
-    // 3b. Fallback: search profiles for any anthropic provider
-    for (const [key, profile] of Object.entries(profiles.profiles)) {
-      if (profile.provider === "anthropic" || key.startsWith("anthropic:")) {
-        const result = resolveToken(profile.token);
-        if (result) return result;
-      }
-    }
-  } catch {
-    // auth-profiles.json not available
-  }
-
+  // 環境変数が無ければ認証なし（fail loud）。外部プロジェクトのファイルは読まない。
   return { method: "none" };
 }
 
@@ -99,20 +49,6 @@ export function createAnthropicClient() {
           "user-agent": "claude-cli/2.1.62",
           "x-app": "cli",
         },
-      });
-    case "openclaw-oauth-token":
-      return new Anthropic.default({
-        authToken: auth.authToken,
-        defaultHeaders: {
-          "anthropic-beta": oauthBeta,
-          "user-agent": "claude-cli/2.1.62",
-          "x-app": "cli",
-        },
-      });
-    case "openclaw-api-key":
-      return new Anthropic.default({
-        apiKey: auth.apiKey,
-        defaultHeaders: { "anthropic-beta": baseBeta },
       });
     case "none":
     default:
