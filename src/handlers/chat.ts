@@ -126,6 +126,21 @@ async function handleBonsaiStreaming(
   });
 }
 
+/**
+ * リクエスト内に cache_control が 1 つも無いとき、トップレベルの自動キャッシュ指定
+ * （最後のキャッシュ可能ブロックに自動配置）を既定付与する（issue #4）。
+ *
+ * OpenAI 形式には cache_control の概念が無いため、素通し設計（クライアントが明示
+ * マーカーを付けてくれば尊重する）だけでは「誰も付けない」状態になり、全リクエストが
+ * 無キャッシュでフルプライスになっていた。明示マーカーがあれば従来どおり一切触らない。
+ */
+function ensureDefaultCacheControl(req: object): void {
+  if (JSON.stringify(req).includes('"cache_control"')) {
+    return; // クライアントの明示配置を尊重（素通し設計を壊さない）
+  }
+  (req as Record<string, unknown>).cache_control = { type: "ephemeral" };
+}
+
 // --- Claude client ---
 
 let client: ReturnType<typeof createAnthropicClient> | null = null;
@@ -245,6 +260,7 @@ export async function handleChatCompletions(
     if (hasTools(body)) {
       // tools付きリクエスト: tool対応パスを使う
       const anthropicReq = buildAnthropicRequestWithTools(body, authToken);
+      ensureDefaultCacheControl(anthropicReq);
       if (body.stream) {
         await handleStreamingWithTools(res, anthropicReq, requestedModel, includeUsage);
       } else {
@@ -253,6 +269,7 @@ export async function handleChatCompletions(
     } else {
       // 通常パス: 既存のconvertRequestを使う
       const anthropicReq = convertRequest(body, authToken);
+      ensureDefaultCacheControl(anthropicReq);
       if (body.stream) {
         await handleStreaming(res, anthropicReq, requestedModel, includeUsage);
       } else {
