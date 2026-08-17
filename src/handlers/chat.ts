@@ -24,6 +24,110 @@ import {
   OpenAIMessage,
 } from "../utils/tool_convert";
 
+// --- Bonsai routing helpers ---
+
+function isBonsaiModel(model: string): boolean {
+  return model === "bonsai" || model === "bonsai-8b";
+}
+
+function getBonsaiUrl(): string {
+  return process.env.BONSAI_URL || "http://localhost:8081";
+}
+
+async function handleBonsaiNonStreaming(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const url = `${getBonsaiUrl()}/v1/chat/completions`;
+  let response: globalThis.Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...req.body, stream: false }),
+    });
+  } catch {
+    res.status(503).json({
+      error: {
+        message: "Bonsai server is unavailable",
+        type: "api_error",
+        param: null,
+        code: null,
+      },
+    });
+    return;
+  }
+  const data = await response.json();
+  res.status(response.status).json(data);
+}
+
+async function handleBonsaiStreaming(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const url = `${getBonsaiUrl()}/v1/chat/completions`;
+  let response: globalThis.Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...req.body, stream: true }),
+    });
+  } catch {
+    res.status(503).json({
+      error: {
+        message: "Bonsai server is unavailable",
+        type: "api_error",
+        param: null,
+        code: null,
+      },
+    });
+    return;
+  }
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({ error: { message: "Bonsai error" } }));
+    res.status(response.status).json(data);
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    res.status(503).json({
+      error: {
+        message: "Bonsai server returned no body",
+        type: "api_error",
+        param: null,
+        code: null,
+      },
+    });
+    return;
+  }
+
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(decoder.decode(value, { stream: true }));
+    }
+  } catch (error) {
+    console.error("Bonsai stream error:", error);
+  } finally {
+    res.end();
+  }
+
+  res.on("close", () => {
+    reader.cancel();
+  });
+}
+
+// --- Claude client ---
+
 let client: ReturnType<typeof createAnthropicClient> | null = null;
 
 function getClient() {
@@ -114,6 +218,16 @@ export async function handleChatCompletions(
           code: null,
         },
       });
+      return;
+    }
+
+    // Bonsai モデルの場合はローカルサーバーに転送
+    if (isBonsaiModel(body.model)) {
+      if (body.stream) {
+        await handleBonsaiStreaming(req, res);
+      } else {
+        await handleBonsaiNonStreaming(req, res);
+      }
       return;
     }
 

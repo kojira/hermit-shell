@@ -18,8 +18,19 @@ export function handleModels(_req: Request, res: Response): void {
     parent: null,
   }));
 
+  const BONSAI_MODELS = ["bonsai-8b"];
+  const bonsaiModels = BONSAI_MODELS.map((id) => ({
+    id,
+    object: "model",
+    created: 1700000000,
+    owned_by: "prismml",
+    permission: [],
+    root: id,
+    parent: null,
+  }));
+
   res.json({
     object: "list",
-    data: models,
+    data: [...models, ...bonsaiModels],
   });
 }
