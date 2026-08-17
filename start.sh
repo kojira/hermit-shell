@@ -7,6 +7,13 @@ LOGFILE="$SCRIPT_DIR/.hermit.log"
 
 cd "$SCRIPT_DIR"
 
+# ローカルの認証ファイル（.hermit-auth・chmod 600・git 管理外）。
+# auth.ts は環境変数を最優先で読むため、これが唯一の認証源になる。
+if [ -f "$SCRIPT_DIR/.hermit-auth" ]; then
+    ANTHROPIC_AUTH_TOKEN="$(cat "$SCRIPT_DIR/.hermit-auth")"
+    export ANTHROPIC_AUTH_TOKEN
+fi
+
 # Already running?
 if [ -f "$PIDFILE" ]; then
     OLD_PID=$(cat "$PIDFILE")
