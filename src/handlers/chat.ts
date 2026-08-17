@@ -315,6 +315,16 @@ async function handleStreaming(
 
   const stream = getClient().messages.stream(params);
 
+  // クライアント切断時の abort は SDK 内部の promise を APIUserAbortError で reject する。
+  // 観測しないと unhandledRejection でプロセスごと落ちる（issue #3・2026-08-17 の本番クラッシュ）。
+  // abort は「切断済みで返す相手がいない」正常系なので静かに終え、それ以外はログに出す。
+  stream.done().catch((error: unknown) => {
+    if (error instanceof Error && error.name === "APIUserAbortError") {
+      return;
+    }
+    console.error("Stream terminated with error:", error);
+  });
+
   stream.on("text", (text: string) => {
     res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, text));
   });
@@ -358,6 +368,14 @@ async function handleStreamingWithTools(
   res.write(createInitialChunk(ctx.id, ctx.model, ctx.created));
 
   const stream = getClient().messages.stream(anthropicReq as any);
+
+  // クライアント切断時の abort を観測する（issue #3。handleStreaming と同じ理由）。
+  stream.done().catch((error: unknown) => {
+    if (error instanceof Error && error.name === "APIUserAbortError") {
+      return;
+    }
+    console.error("Stream terminated with error:", error);
+  });
 
   // テキスト部分はリアルタイムでストリーム
   stream.on("text", (text: string) => {
