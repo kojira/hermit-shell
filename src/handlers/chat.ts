@@ -153,6 +153,15 @@ function getClient() {
 }
 
 /**
+ * 共有クライアントのキャッシュを破棄する。次の getClient() が現在の env から
+ * 作り直すため、設定ページでトークンを差し替えたあとに呼べば再起動なしで全経路
+ * （streaming/non-streaming・tools 有無すべて getClient 経由）へ新トークンが効く。
+ */
+export function resetClient(): void {
+  client = null;
+}
+
+/**
  * リクエストにtoolsが含まれているかチェックする。
  * tools対応パスと通常パスを分岐するために使用。
  */
