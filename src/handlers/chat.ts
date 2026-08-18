@@ -298,23 +298,33 @@ async function handleNonStreaming(
   anthropicReq: any,
   requestedModel: string
 ): Promise<void> {
-  const { stream, ...params } = anthropicReq;
-  const response = await getClient().messages.create(params);
-  const openaiResponse = convertResponse(response, requestedModel);
+  const { stream: _stream, ...params } = anthropicReq;
+  // クライアントには非ストリーミングの単一応答を返すが、Anthropic へは内部でストリーミング
+  // として呼び、最終メッセージを集約する。SDK 0.80 は非ストリーミングで max_tokens が大きいと
+  // calculateNonstreamingTimeout のガードにより
+  // "Streaming is required for operations that may take longer than 10 minutes" を投げる
+  // （#676 で opus-5 の max_tokens が 128000 になり顕在化）。messages.stream() 経路には
+  // このガードが無いため回避できる。集約中のエラーは finalMessage() が reject し、
+  // 呼び出し側の try/catch が 500 として正直に返す（握り潰して部分応答を返さない）。
+  const finalMsg = await getClient().messages.stream(params).finalMessage();
+  const openaiResponse = convertResponse(finalMsg, requestedModel);
   res.json(openaiResponse);
 }
 
 /**
  * tools付き非ストリーミングレスポンス処理。
  * tool_use ブロックをOpenAI tool_calls形式に変換して返す。
+ * handleNonStreaming と同じ理由で、内部はストリーミングで呼んで最終メッセージを集約する。
  */
 async function handleNonStreamingWithTools(
   res: Response,
   anthropicReq: Record<string, unknown>,
   requestedModel: string
 ): Promise<void> {
-  const response = await getClient().messages.create(anthropicReq as any);
-  const openaiResponse = convertResponseWithTools(response, requestedModel);
+  const finalMsg = await getClient()
+    .messages.stream(anthropicReq as any)
+    .finalMessage();
+  const openaiResponse = convertResponseWithTools(finalMsg, requestedModel);
   res.json(openaiResponse);
 }
 
