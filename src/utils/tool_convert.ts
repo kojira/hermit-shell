@@ -165,14 +165,19 @@ export function openaiMessagesToAnthropic(
         });
       }
     } else if (msg.role === "tool") {
-      // Tool result → user message with tool_result block
+      // Tool result → user message with tool_result block.
+      // content が配列（マルチパート）のときも user と同じ変換を通す——image_url を
+      // Anthropic の image ブロックへ（無変換で素通しすると Anthropic が 400 を返す）。
+      const toolContent = Array.isArray(msg.content)
+        ? msg.content.map(convertPartToAnthropic)
+        : (msg.content ?? "");
       result.push({
         role: "user",
         content: [
           {
             type: "tool_result",
             tool_use_id: msg.tool_call_id ?? "",
-            content: msg.content ?? "",
+            content: toolContent,
           } as AnthropicToolResultBlock,
         ],
       });
@@ -181,17 +186,7 @@ export function openaiMessagesToAnthropic(
       let anthropicContent: unknown;
       if (Array.isArray(msg.content)) {
         // Convert OpenAI ContentParts to Anthropic format
-        anthropicContent = msg.content.map((part: any) => {
-          if (part.type === "text") {
-            return { ...part, type: "text" };
-          } else if (part.type === "image_url") {
-            return {
-              type: "image",
-              source: { type: "url", url: part.image_url.url }
-            };
-          }
-          return part;
-        });
+        anthropicContent = msg.content.map(convertPartToAnthropic);
       } else {
         anthropicContent = msg.content ?? "";
       }
@@ -326,4 +321,29 @@ export function convertResponseWithTools(
         (anthropicResponse.usage?.output_tokens ?? 0),
     },
   };
+}
+
+/**
+ * OpenAI の content part を Anthropic のブロックへ変換する（user / tool_result 共通）。
+ * - text はそのまま。
+ * - image_url は Anthropic の image ブロックへ。data URI は base64 ソースに（Anthropic の
+ *   url ソースは http(s) のみで data: を受けない）、http(s) は url ソースに写す。
+ * - 知らない type は素通し（Anthropic 側が明確な 400 で知らせる——ここで黙って捨てない）。
+ */
+function convertPartToAnthropic(part: any): any {
+  if (part?.type === "text") {
+    return { type: "text", text: part.text ?? "" };
+  }
+  if (part?.type === "image_url") {
+    const url: string = part.image_url?.url ?? "";
+    const m = url.match(/^data:([^;,]+);base64,(.*)$/s);
+    if (m) {
+      return {
+        type: "image",
+        source: { type: "base64", media_type: m[1], data: m[2] },
+      };
+    }
+    return { type: "image", source: { type: "url", url } };
+  }
+  return part;
 }
