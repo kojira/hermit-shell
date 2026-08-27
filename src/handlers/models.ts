@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { CODEX_MODELS } from "../utils/codex_convert";
 
 export function handleModels(_req: Request, res: Response): void {
   const CLAUDE_MODELS = [
@@ -29,8 +30,19 @@ export function handleModels(_req: Request, res: Response): void {
     parent: null,
   }));
 
+  // 代表モデルのみ列挙。ルーティングは gpt-* 前方一致なので未掲載の id も通る。
+  const codexModels = CODEX_MODELS.map((id) => ({
+    id,
+    object: "model",
+    created: 1700000000,
+    owned_by: "openai-codex",
+    permission: [],
+    root: id,
+    parent: null,
+  }));
+
   res.json({
     object: "list",
-    data: [...models, ...bonsaiModels],
+    data: [...models, ...bonsaiModels, ...codexModels],
   });
 }

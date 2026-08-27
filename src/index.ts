@@ -1,5 +1,6 @@
 import app from "./server";
 import { resolveAuth } from "./utils/auth";
+import { codexStatus } from "./handlers/codex_setup";
 
 const PORT = parseInt(process.env.PORT || "8765", 10);
 
@@ -17,4 +18,11 @@ app.listen(PORT, () => {
 
   const auth = resolveAuth();
   console.log(`Auth: ${AUTH_LABELS[auth.method]}`);
+
+  const codex = codexStatus();
+  console.log(
+    codex.configured
+      ? `Codex auth: configured (account ${codex.maskedAccountId})`
+      : "Codex auth: not configured — open /setup to login (gpt-* models unavailable)"
+  );
 });

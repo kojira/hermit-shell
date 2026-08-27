@@ -9,6 +9,7 @@ import {
   getAuthFilePath,
 } from "../utils/auth";
 import { resetClient } from "./chat";
+import { codexStatus } from "./codex_setup";
 
 /**
  * リクエスト元が loopback かどうかを、ソケットの実接続元アドレスだけで判定する。
@@ -55,6 +56,11 @@ function renderPage(): string {
   const { masked, lastApplied } = currentStatus();
   const maskedSafe = masked ? escapeHtml(masked) : "(未設定)";
   const lastSafe = lastApplied ? escapeHtml(lastApplied) : "(不明)";
+  const codex = codexStatus();
+  const codexAccountSafe = codex.maskedAccountId
+    ? escapeHtml(codex.maskedAccountId)
+    : "(未設定)";
+  const codexLastSafe = codex.lastApplied ? escapeHtml(codex.lastApplied) : "(不明)";
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -69,9 +75,10 @@ function renderPage(): string {
   input[type=password] { width: 100%; box-sizing: border-box; padding: 10px; font-family: monospace; font-size: 0.95rem; }
   button { margin-top: 12px; padding: 10px 18px; font-size: 1rem; cursor: pointer; }
   .muted { color: #666; font-size: 0.9rem; }
-  #result { margin-top: 12px; padding: 10px; border-radius: 6px; display: none; white-space: pre-wrap; }
-  #result.ok { display: block; background: #e7f6e7; border: 1px solid #86c586; }
-  #result.err { display: block; background: #fdeaea; border: 1px solid #e0a3a3; }
+  #result, #codex-result { margin-top: 12px; padding: 10px; border-radius: 6px; display: none; white-space: pre-wrap; }
+  #result.ok, #codex-result.ok { display: block; background: #e7f6e7; border: 1px solid #86c586; }
+  #result.err, #codex-result.err { display: block; background: #fdeaea; border: 1px solid #e0a3a3; }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: 10px; font-family: monospace; font-size: 0.95rem; }
 </style>
 </head>
 <body>
@@ -86,6 +93,25 @@ function renderPage(): string {
   <button id="apply">検証して適用</button>
   <div id="result"></div>
   <p class="muted">入力トークンで Anthropic へ最小の検証呼び出しを行い、成功したときだけ保存・即適用します。失敗時は何も変更しません。</p>
+</div>
+<h1>OpenAI Codex (ChatGPT サブスク) 認証設定</h1>
+<div class="card">
+  <div>アカウント: <code>${codexAccountSafe}</code></div>
+  <div class="muted">最終適用: ${codexLastSafe}</div>
+</div>
+<div class="card">
+  <button id="codex-start">ログイン URL を発行</button>
+  <div id="codex-url" class="muted" style="display:none; margin-top:12px; word-break:break-all;"></div>
+  <div id="codex-paste" style="display:none; margin-top:12px;">
+    <label for="codex-input">リダイレクト先 URL（アドレスバーの <code>http://localhost:1455/auth/callback?code=…</code> 全体）を貼り付け</label>
+    <input id="codex-input" type="text" autocomplete="off" placeholder="http://localhost:1455/auth/callback?code=...&state=...">
+    <button id="codex-finish">完了する</button>
+  </div>
+  <div id="codex-result"></div>
+  <p class="muted">上のリンクをブラウザで開いて ChatGPT アカウントでログインしてください。
+  リダイレクト先（localhost:1455）は通常「接続できません」になります — それで正常です。
+  そのページの URL 全体をコピーしてここに貼り付けてください。
+  <code>ssh -L 1455:127.0.0.1:1455</code> を張っている場合は貼り付け不要で自動完了します。</p>
 </div>
 <script>
   const btn = document.getElementById('apply');
@@ -117,6 +143,80 @@ function renderPage(): string {
       result.textContent = '通信エラー';
     } finally {
       btn.disabled = false;
+    }
+  });
+
+  // --- OpenAI Codex ログイン ---
+  const codexStart = document.getElementById('codex-start');
+  const codexFinish = document.getElementById('codex-finish');
+  const codexResult = document.getElementById('codex-result');
+  let codexPoll = null;
+
+  function codexShow(cls, text) {
+    codexResult.className = cls;
+    codexResult.textContent = text;
+  }
+
+  codexStart.addEventListener('click', async () => {
+    codexStart.disabled = true;
+    try {
+      const r = await fetch('/setup/codex/start', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) { codexShow('err', 'エラー: ' + (data.error || r.status)); return; }
+      const urlDiv = document.getElementById('codex-url');
+      urlDiv.style.display = 'block';
+      urlDiv.innerHTML = '';
+      const a = document.createElement('a');
+      a.href = data.url; a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = data.url;
+      urlDiv.appendChild(a);
+      document.getElementById('codex-paste').style.display = 'block';
+      codexShow('', '');
+      // コールバック（ssh -L 1455 経由）での自動完了をポーリングで検知する
+      if (codexPoll) clearInterval(codexPoll);
+      codexPoll = setInterval(async () => {
+        try {
+          const s = await fetch('/setup/codex/status');
+          const sd = await s.json();
+          if (sd.lastResult) {
+            clearInterval(codexPoll); codexPoll = null;
+            codexShow(sd.lastResult.ok ? 'ok' : 'err', sd.lastResult.message);
+            if (sd.lastResult.ok) setTimeout(() => location.reload(), 1500);
+          }
+        } catch (e) { /* 一時的な通信エラーは無視 */ }
+      }, 2000);
+    } catch (e) {
+      codexShow('err', '通信エラー');
+    } finally {
+      codexStart.disabled = false;
+    }
+  });
+
+  codexFinish.addEventListener('click', async () => {
+    const input = document.getElementById('codex-input').value.trim();
+    if (!input) { codexShow('err', 'リダイレクト URL を貼り付けてください'); return; }
+    codexFinish.disabled = true;
+    codexShow('', '');
+    codexResult.style.display = 'block';
+    codexResult.textContent = 'トークン交換中...';
+    try {
+      const r = await fetch('/setup/codex/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input }),
+      });
+      const data = await r.json();
+      if (r.ok) {
+        if (codexPoll) { clearInterval(codexPoll); codexPoll = null; }
+        codexShow('ok', data.message || 'ログイン完了');
+        setTimeout(() => location.reload(), 1500);
+      } else {
+        codexShow('err', 'エラー: ' + (data.error || r.status));
+      }
+    } catch (e) {
+      codexShow('err', '通信エラー');
+    } finally {
+      codexFinish.disabled = false;
     }
   });
 </script>

@@ -23,6 +23,8 @@ import {
   OpenAITool,
   OpenAIMessage,
 } from "../utils/tool_convert";
+import { isCodexModel } from "../utils/codex_convert";
+import { handleCodexChatCompletions } from "./codex_chat";
 
 // --- Bonsai routing helpers ---
 
@@ -252,6 +254,12 @@ export async function handleChatCompletions(
       } else {
         await handleBonsaiNonStreaming(req, res);
       }
+      return;
+    }
+
+    // gpt-* は OpenAI Codex (ChatGPT サブスク) バックエンドへ（bonsai と同じモデル名分岐）
+    if (isCodexModel(body.model)) {
+      await handleCodexChatCompletions(req, res);
       return;
     }
 
