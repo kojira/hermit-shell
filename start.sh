@@ -29,7 +29,7 @@ if [ -f "$PIDFILE" ]; then
 fi
 
 # Start in background
-nohup node dist/index.js >> "$LOGFILE" 2>&1 &
+nohup env NODE_OPTIONS=--dns-result-order=ipv4first node dist/index.js >> "$LOGFILE" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "$PIDFILE"
 

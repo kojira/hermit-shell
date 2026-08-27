@@ -108,7 +108,7 @@ test("buildCodexRequestBody: tool 履歴を function_call / function_call_output
   );
   assert.deepEqual(body.input, [
     { role: "user", content: "search something" },
-    { role: "assistant", content: "searching..." },
+    { role: "assistant", content: [{ type: "output_text", text: "searching..." }] },
     { type: "function_call", call_id: "call_1", name: "web_search", arguments: '{"q":"x"}' },
     { type: "function_call_output", call_id: "call_1", output: "result text" },
   ]);
@@ -225,4 +225,36 @@ test("truncateAtStop: 最初の stop 文字列の末尾で切る（JIT と同じ
   assert.equal(truncateAtStop("abcdef", ["<end>"]), "abcdef");
   assert.equal(truncateAtStop("abcdef", undefined), "abcdef");
   assert.equal(truncateAtStop("a|b;c", [";", "|"]), "a|b;"); // 配列順に最初のヒット
+});
+
+test("buildCodexRequestBody: assistant 履歴は output_text パーツになる (2026-08-28 実測 400 の回帰)", () => {
+  const body: any = {
+    model: "gpt-5.6-luna",
+    messages: [
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: [{ type: "text", text: "q2" }] },
+    ],
+  };
+  const req: any = buildCodexRequestBody(body, false);
+  const asst = req.input.find((m: any) => m.role === "assistant");
+  assert.deepEqual(asst.content, [{ type: "output_text", text: "a1" }]);
+  // user 側は input 系のまま
+  const users = req.input.filter((m: any) => m.role === "user");
+  assert.equal(typeof users[0].content, "string");
+  assert.equal(users[1].content[0].type, "input_text");
+});
+
+test("buildCodexRequestBody: tool_call つき assistant の本文も output_text", () => {
+  const body: any = {
+    model: "gpt-5.6-luna",
+    messages: [
+      { role: "assistant", content: "calling", tool_calls: [
+        { id: "c1", function: { name: "f", arguments: "{}" } } ] },
+      { role: "tool", tool_call_id: "c1", content: "result" },
+    ],
+  };
+  const req: any = buildCodexRequestBody(body, false);
+  const asst = req.input.find((m: any) => m.role === "assistant");
+  assert.deepEqual(asst.content, [{ type: "output_text", text: "calling" }]);
 });

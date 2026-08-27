@@ -92,6 +92,14 @@ function contentToInputContent(content: unknown): unknown {
   return "";
 }
 
+/** assistant 履歴の content → Responses の output content。
+ *  responses API は assistant ロールに input_text を認めない
+ *  （400: "Supported values are: output_text and refusal" — 2026-08-28 実測）。 */
+function contentToOutputContent(content: unknown): unknown {
+  const text = contentToText(content);
+  return [{ type: "output_text", text }];
+}
+
 /** OpenAI chat リクエスト → codex/responses リクエストボディ。 */
 export function buildCodexRequestBody(
   body: OpenAIChatBody,
@@ -110,7 +118,7 @@ export function buildCodexRequestBody(
       // 本文つき tool call は本文も履歴に残す（opencrab chatgpt.rs:678-702）。
       const text = contentToText(msg.content);
       if (text) {
-        input.push({ role: "assistant", content: text });
+        input.push({ role: "assistant", content: contentToOutputContent(msg.content) });
       }
       for (const tc of msg.tool_calls) {
         input.push({
@@ -134,10 +142,11 @@ export function buildCodexRequestBody(
       continue;
     }
     // user / assistant の通常メッセージ
-    input.push({
-      role: msg.role === "assistant" ? "assistant" : "user",
-      content: contentToInputContent(msg.content),
-    });
+    if (msg.role === "assistant") {
+      input.push({ role: "assistant", content: contentToOutputContent(msg.content) });
+    } else {
+      input.push({ role: "user", content: contentToInputContent(msg.content) });
+    }
   }
 
   const req: Record<string, unknown> = {
