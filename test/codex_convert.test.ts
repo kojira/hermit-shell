@@ -7,6 +7,7 @@ import {
   buildCodexRequestBody,
   codexFinishReason,
   createAggregate,
+  finalText,
   getCodexResponsesUrl,
   isCodexModel,
   truncateAtStop,
@@ -257,4 +258,59 @@ test("buildCodexRequestBody: tool_call つき assistant の本文も output_text
   const req: any = buildCodexRequestBody(body, false);
   const asst = req.input.find((m: any) => m.role === "assistant");
   assert.deepEqual(asst.content, [{ type: "output_text", text: "calling" }]);
+});
+
+/** 複数 message アイテムの集約を作るヘルパ (2026-08-28 実測: verbosity=medium で
+ *  message アイテム 7 個(ほぼ同一 JSON)が 1 応答に出る — その縮小版 3 個)。 */
+function aggregateWithBlocks(blocks: string[]) {
+  const agg = createAggregate();
+  for (const text of blocks) {
+    applyCodexEvent(agg, { type: "response.output_item.added", item: { type: "message" } });
+    applyCodexEvent(agg, { type: "response.output_text.delta", delta: text });
+  }
+  return agg;
+}
+
+test("finalText: 複数 message アイテムは既定(concat)で \\n\\n 連結", () => {
+  const prev = process.env.HERMIT_CODEX_TEXT_MODE;
+  try {
+    delete process.env.HERMIT_CODEX_TEXT_MODE;
+    const agg = aggregateWithBlocks(['{"a":1}', '{"a":2}', '{"a":3}']);
+    // content 直読みだと {...}{...}{...} になり strict-JSON 消費者が壊れる
+    assert.equal(agg.content, '{"a":1}{"a":2}{"a":3}');
+    assert.equal(finalText(agg), '{"a":1}\n\n{"a":2}\n\n{"a":3}');
+    // 非ストリーミング応答も finalText 経由
+    const res = aggregateToOpenAIResponse(agg, "gpt-5.6-luna", "id", 0) as any;
+    assert.equal(res.choices[0].message.content, '{"a":1}\n\n{"a":2}\n\n{"a":3}');
+  } finally {
+    if (prev === undefined) delete process.env.HERMIT_CODEX_TEXT_MODE;
+    else process.env.HERMIT_CODEX_TEXT_MODE = prev;
+  }
+});
+
+test("finalText: HERMIT_CODEX_TEXT_MODE=last は最後の非空ブロックを返す", () => {
+  const prev = process.env.HERMIT_CODEX_TEXT_MODE;
+  try {
+    process.env.HERMIT_CODEX_TEXT_MODE = "last";
+    const agg = aggregateWithBlocks(['{"a":1}', '{"a":2}', '{"a":3}']);
+    assert.equal(finalText(agg), '{"a":3}');
+    // 空ブロック（deltaが来なかった message アイテム）は飛ばす
+    const agg2 = aggregateWithBlocks(['{"a":1}', '{"a":2}']);
+    applyCodexEvent(agg2, { type: "response.output_item.added", item: { type: "message" } });
+    assert.equal(finalText(agg2), '{"a":2}');
+  } finally {
+    if (prev === undefined) delete process.env.HERMIT_CODEX_TEXT_MODE;
+    else process.env.HERMIT_CODEX_TEXT_MODE = prev;
+  }
+});
+
+test("finalText: 単一 message アイテムなら content と同一（後方互換）", () => {
+  const agg = aggregateWithBlocks(["Hello world"]);
+  assert.equal(finalText(agg), agg.content);
+  assert.equal(finalText(agg), "Hello world");
+  // output_item.added を出さない backend でも delta だけでブロックが立つ
+  const agg2 = createAggregate();
+  applyCodexEvent(agg2, { type: "response.output_text.delta", delta: "no added event" });
+  assert.equal(agg2.textBlocks.length, 1);
+  assert.equal(finalText(agg2), agg2.content);
 });

@@ -246,6 +246,11 @@ export interface CodexToolCall {
 export interface CodexAggregate {
   responseId: string | null;
   content: string;
+  /** message アイテム単位のテキスト。backend は 1 応答に message を複数出すことがある
+   *  (2026-08-28 実測: verbosity=medium で message アイテム 7 個(ほぼ同一 JSON)が
+   *  1 応答に出る)。content は無区切り連結なので、非ストリーミングでは
+   *  finalText() でアイテム境界を尊重した本文を組む。 */
+  textBlocks: string[];
   reasoning: string;
   toolCalls: CodexToolCall[];
   usage: {
@@ -264,6 +269,7 @@ export function createAggregate(): CodexAggregate {
   return {
     responseId: null,
     content: "",
+    textBlocks: [],
     reasoning: "",
     toolCalls: [],
     usage: null,
@@ -304,9 +310,24 @@ export function applyCodexEvent(
       if (event.response?.id) agg.responseId = event.response.id;
       return {};
     }
+    case "response.output_item.added": {
+      // message アイテムの開始でテキストブロックを切る (2026-08-28 実測:
+      // verbosity=medium で message アイテム 7 個(ほぼ同一 JSON)が 1 応答に出る)。
+      if (event.item?.type === "message") {
+        agg.textBlocks.push("");
+      }
+      return {};
+    }
     case "response.output_text.delta": {
       const delta = typeof event.delta === "string" ? event.delta : "";
+      // content はストリーミング素通し用にそのまま連結を維持する。
       agg.content += delta;
+      // output_item.added を出さない backend への防御: ブロックが無ければ作る。
+      if (agg.textBlocks.length === 0) {
+        agg.textBlocks.push(delta);
+      } else {
+        agg.textBlocks[agg.textBlocks.length - 1] += delta;
+      }
       return { textDelta: delta };
     }
     case "response.reasoning_summary_text.delta": {
@@ -374,6 +395,23 @@ export function applyCodexEvent(
   }
 }
 
+/** 非ストリーミング応答の本文。message アイテムが複数あるとき、content の
+ *  無区切り連結だと {...}{...}{...} になり strict-JSON 消費者 (JIT) がパースに
+ *  失敗する (2026-08-28 実測: verbosity=medium で message アイテム 7 個
+ *  (ほぼ同一 JSON)が 1 応答に出る)。
+ *  HERMIT_CODEX_TEXT_MODE=last → 最後の非空ブロックのみ / 既定 concat →
+ *  非空ブロックを "\n\n" 連結。単一ブロック以下なら content と同一（後方互換）。 */
+export function finalText(agg: CodexAggregate): string {
+  if (agg.textBlocks.length <= 1) return agg.content;
+  const nonEmpty = agg.textBlocks.filter((b) => b !== "");
+  if (nonEmpty.length === 0) return agg.content;
+  const mode = process.env.HERMIT_CODEX_TEXT_MODE || "concat";
+  if (mode === "last") {
+    return nonEmpty[nonEmpty.length - 1];
+  }
+  return nonEmpty.join("\n\n");
+}
+
 export function codexFinishReason(agg: CodexAggregate): "stop" | "length" | "tool_calls" {
   // 打ち切りは tool_calls / content より優先して length（opencrab chatgpt.rs:952-961）。
   if (agg.truncated) return "length";
@@ -407,7 +445,8 @@ export function aggregateToOpenAIResponse(
 ): Record<string, unknown> {
   const message: Record<string, unknown> = {
     role: "assistant",
-    content: truncateAtStop(agg.content, stop) || null,
+    // content 直読みだと複数 message アイテムが無区切り連結になるので finalText で組む。
+    content: truncateAtStop(finalText(agg), stop) || null,
   };
   if (agg.reasoning.trim()) {
     message.reasoning_content = agg.reasoning.trim();
