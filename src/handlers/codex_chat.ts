@@ -2,12 +2,14 @@ import { Request, Response } from "express";
 import { getFreshCodexTokens } from "../utils/codex_auth";
 import {
   CodexSSEParser,
+  CodexTextMode,
   applyCodexEvent,
   aggregateToOpenAIResponse,
   buildCodexRequestBody,
   codexFinishReason,
   createAggregate,
   getCodexResponsesUrl,
+  parseModelTextMode,
 } from "../utils/codex_convert";
 import {
   initSSE,
@@ -71,6 +73,18 @@ export async function handleCodexChatCompletions(
 ): Promise<void> {
   const body = req.body;
 
+  // 入口でモデル名サフィックス "#first"/"#last"/"#concat" を剥がす。
+  // backend にはクリーンなモデル名を送り、モードはこのリクエストの
+  // finalText にだけ効かせる (2026-08-28 実測: メタ生成の長文応答は複数
+  // message に正当に分割されるため first だと後半ファイル欠落、一方ステップ
+  // 実行は first が必須 — 同一プロセスで両立するにはリクエスト毎指定が要る)。
+  let textMode: CodexTextMode | undefined;
+  if (typeof body.model === "string") {
+    const parsed = parseModelTextMode(body.model);
+    body.model = parsed.model;
+    textMode = parsed.textMode;
+  }
+
   let tokens;
   try {
     tokens = await getFreshCodexTokens();
@@ -124,9 +138,10 @@ export async function handleCodexChatCompletions(
   }
 
   if (stream) {
+    // ストリーミングはデルタ素通しなので textMode は関与しない。
     await pipeStreaming(res, backendRes, body);
   } else {
-    await aggregateNonStreaming(res, backendRes, body);
+    await aggregateNonStreaming(res, backendRes, body, textMode);
   }
 }
 
@@ -157,7 +172,8 @@ async function readBackendEvents(
 async function aggregateNonStreaming(
   res: Response,
   backendRes: globalThis.Response,
-  body: any
+  body: any,
+  textMode?: CodexTextMode
 ): Promise<void> {
   const agg = createAggregate();
   try {
@@ -171,7 +187,9 @@ async function aggregateNonStreaming(
     return;
   }
   const ctx = createStreamContext(body.model);
-  res.json(aggregateToOpenAIResponse(agg, ctx.model, ctx.id, ctx.created, body.stop));
+  res.json(
+    aggregateToOpenAIResponse(agg, ctx.model, ctx.id, ctx.created, body.stop, textMode)
+  );
 }
 
 async function pipeStreaming(

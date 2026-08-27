@@ -10,6 +10,7 @@ import {
   finalText,
   getCodexResponsesUrl,
   isCodexModel,
+  parseModelTextMode,
   truncateAtStop,
 } from "../src/utils/codex_convert";
 
@@ -320,6 +321,58 @@ test("finalText: HERMIT_CODEX_TEXT_MODE=first は最初の非空ブロックを�
     applyCodexEvent(agg2, { type: "response.output_item.added", item: { type: "message" } });
     applyCodexEvent(agg2, { type: "response.output_text.delta", delta: '{"a":2}' });
     assert.equal(finalText(agg2), '{"a":1}');
+  } finally {
+    if (prev === undefined) delete process.env.HERMIT_CODEX_TEXT_MODE;
+    else process.env.HERMIT_CODEX_TEXT_MODE = prev;
+  }
+});
+
+test("parseModelTextMode: サフィックスを剥がしてモードにする(未知は残す)", () => {
+  assert.deepEqual(parseModelTextMode("gpt-5.6-luna#first"), {
+    model: "gpt-5.6-luna",
+    textMode: "first",
+  });
+  assert.deepEqual(parseModelTextMode("gpt-5.6-luna#last"), {
+    model: "gpt-5.6-luna",
+    textMode: "last",
+  });
+  assert.deepEqual(parseModelTextMode("gpt-5.5#concat"), {
+    model: "gpt-5.5",
+    textMode: "concat",
+  });
+  // サフィックス無し → モード無し(env フォールバックに任せる)
+  assert.deepEqual(parseModelTextMode("gpt-5.6-luna"), { model: "gpt-5.6-luna" });
+  // 未知サフィックスはモデル名の一部として残す(誤爆防止)
+  assert.deepEqual(parseModelTextMode("gpt-5.6-luna#bogus"), {
+    model: "gpt-5.6-luna#bogus",
+  });
+});
+
+test("parseModelTextMode: サフィックス付きモデルは request body にクリーン名が載る", () => {
+  const { model, textMode } = parseModelTextMode("gpt-5.6-luna#first");
+  assert.equal(textMode, "first");
+  const req: any = buildCodexRequestBody(
+    { model, messages: [{ role: "user", content: "hi" }] } as any,
+    true
+  );
+  assert.equal(req.model, "gpt-5.6-luna");
+});
+
+test("finalText: 引数モードは env より優先(リクエスト毎指定)", () => {
+  // 2026-08-28 実測: メタ生成の長文応答は複数 message に正当に分割されるため
+  // first だと後半ファイル欠落、一方ステップ実行は first が必須 —
+  // 同一プロセスで両立するにはリクエスト毎指定が要る。
+  const prev = process.env.HERMIT_CODEX_TEXT_MODE;
+  try {
+    process.env.HERMIT_CODEX_TEXT_MODE = "last";
+    const agg = aggregateWithBlocks(['{"a":1}', '{"a":2}', '{"a":3}']);
+    assert.equal(finalText(agg, "first"), '{"a":1}');
+    assert.equal(finalText(agg, "concat"), '{"a":1}\n\n{"a":2}\n\n{"a":3}');
+    // 引数無しは従来どおり env にフォールバック
+    assert.equal(finalText(agg), '{"a":3}');
+    // aggregateToOpenAIResponse も textMode を素通しする
+    const res = aggregateToOpenAIResponse(agg, "gpt-5.6-luna", "id", 0, undefined, "first") as any;
+    assert.equal(res.choices[0].message.content, '{"a":1}');
   } finally {
     if (prev === undefined) delete process.env.HERMIT_CODEX_TEXT_MODE;
     else process.env.HERMIT_CODEX_TEXT_MODE = prev;

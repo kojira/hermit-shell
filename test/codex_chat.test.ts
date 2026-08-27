@@ -20,7 +20,7 @@ delete process.env.ANTHROPIC_AUTH_TOKEN;
 
 // 偽 backend が最後に受け取ったリクエスト（変換の検証に使う）
 let lastBackendRequest: { headers: http.IncomingHttpHeaders; body: any } | null = null;
-let backendMode: "text" | "toolcall" | "error401" = "text";
+let backendMode: "text" | "multimsg" | "toolcall" | "error401" = "text";
 
 const fakeBackend = http.createServer((req, res) => {
   let body = "";
@@ -56,6 +56,20 @@ const fakeBackend = http.createServer((req, res) => {
             total_tokens: 27,
             input_tokens_details: { cached_tokens: 3 },
           },
+        },
+      });
+    } else if (backendMode === "multimsg") {
+      // 2026-08-28 実測の再現: 1 応答に message アイテムが複数出る
+      write({ type: "response.output_item.added", item: { type: "message" } });
+      write({ type: "response.output_text.delta", delta: '{"step":"tool_call"}' });
+      write({ type: "response.output_item.added", item: { type: "message" } });
+      write({ type: "response.output_text.delta", delta: '{"step":"conclusion"}' });
+      write({
+        type: "response.completed",
+        response: {
+          id: "resp_fake",
+          status: "completed",
+          usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13 },
         },
       });
     } else {
@@ -207,6 +221,47 @@ test("非ストリーミング: tool call を tool_calls に変換して返す",
       function: { name: "web_search", arguments: '{"q":"news"}' },
     },
   ]);
+});
+
+test("モデル名サフィックス #first: backend へはクリーン名、応答は最初の message", async () => {
+  // 同一プロセスでメタ生成(concat 必要)とステップ実行(first 必須)を両立する
+  // ためのリクエスト毎モード指定 (2026-08-28 実測)。
+  writeAuthFile();
+  backendMode = "multimsg";
+  const r = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.6-luna#first",
+      messages: [{ role: "user", content: "step" }],
+    }),
+  });
+  assert.equal(r.status, 200);
+  const data = (await r.json()) as any;
+  // backend にはサフィックスを剥がしたモデル名だけが渡る
+  assert.equal(lastBackendRequest!.body.model, "gpt-5.6-luna");
+  // first: 最初の message アイテムのみ(結論側は捨てる)
+  assert.equal(data.choices[0].message.content, '{"step":"tool_call"}');
+  assert.equal(data.model, "gpt-5.6-luna");
+});
+
+test("サフィックス無し multimsg は既定(concat)で \\n\\n 連結", async () => {
+  writeAuthFile();
+  backendMode = "multimsg";
+  const r = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-5.6-luna",
+      messages: [{ role: "user", content: "step" }],
+    }),
+  });
+  assert.equal(r.status, 200);
+  const data = (await r.json()) as any;
+  assert.equal(
+    data.choices[0].message.content,
+    '{"step":"tool_call"}\n\n{"step":"conclusion"}'
+  );
 });
 
 test("ストリーミング: OpenAI chunk 形式で転送し [DONE] で終わる", async () => {
