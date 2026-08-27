@@ -304,6 +304,28 @@ test("finalText: HERMIT_CODEX_TEXT_MODE=last は最後の非空ブロックを�
   }
 });
 
+test("finalText: HERMIT_CODEX_TEXT_MODE=first は最初の非空ブロックを返す", () => {
+  // 2026-08-28 実測: last だと多段 message のロールプレイ軌跡の「結論」だけが返り、
+  // ツール未実行のまま step 1 で final_answer される。agentic には first が正しい。
+  const prev = process.env.HERMIT_CODEX_TEXT_MODE;
+  try {
+    process.env.HERMIT_CODEX_TEXT_MODE = "first";
+    const agg = aggregateWithBlocks(['{"tool":"call"}', '{"imagined":"result"}', '{"final":"give-up"}']);
+    assert.equal(finalText(agg), '{"tool":"call"}');
+    // 先頭が空ブロック（delta が来なかった message アイテム）なら次の非空を返す
+    const agg2 = createAggregate();
+    applyCodexEvent(agg2, { type: "response.output_item.added", item: { type: "message" } });
+    applyCodexEvent(agg2, { type: "response.output_item.added", item: { type: "message" } });
+    applyCodexEvent(agg2, { type: "response.output_text.delta", delta: '{"a":1}' });
+    applyCodexEvent(agg2, { type: "response.output_item.added", item: { type: "message" } });
+    applyCodexEvent(agg2, { type: "response.output_text.delta", delta: '{"a":2}' });
+    assert.equal(finalText(agg2), '{"a":1}');
+  } finally {
+    if (prev === undefined) delete process.env.HERMIT_CODEX_TEXT_MODE;
+    else process.env.HERMIT_CODEX_TEXT_MODE = prev;
+  }
+});
+
 test("finalText: 単一 message アイテムなら content と同一（後方互換）", () => {
   const agg = aggregateWithBlocks(["Hello world"]);
   assert.equal(finalText(agg), agg.content);

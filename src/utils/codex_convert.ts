@@ -399,13 +399,20 @@ export function applyCodexEvent(
  *  無区切り連結だと {...}{...}{...} になり strict-JSON 消費者 (JIT) がパースに
  *  失敗する (2026-08-28 実測: verbosity=medium で message アイテム 7 個
  *  (ほぼ同一 JSON)が 1 応答に出る)。
- *  HERMIT_CODEX_TEXT_MODE=last → 最後の非空ブロックのみ / 既定 concat →
- *  非空ブロックを "\n\n" 連結。単一ブロック以下なら content と同一（後方互換）。 */
+ *  HERMIT_CODEX_TEXT_MODE=first → 最初の非空ブロックのみ / last → 最後の
+ *  非空ブロックのみ / 既定 concat → 非空ブロックを "\n\n" 連結。
+ *  単一ブロック以下なら content と同一（後方互換）。
+ *  agentic なステップループには first が正しい (2026-08-28 実測: TEXT_MODE=last
+ *  だと多段 message のロールプレイ軌跡の「結論」だけが返り、ツール未実行のまま
+ *  step 1 で final_answer される — 最初のアイテムが即時実行可能な JSON)。 */
 export function finalText(agg: CodexAggregate): string {
   if (agg.textBlocks.length <= 1) return agg.content;
   const nonEmpty = agg.textBlocks.filter((b) => b !== "");
   if (nonEmpty.length === 0) return agg.content;
   const mode = process.env.HERMIT_CODEX_TEXT_MODE || "concat";
+  if (mode === "first") {
+    return nonEmpty[0];
+  }
   if (mode === "last") {
     return nonEmpty[nonEmpty.length - 1];
   }
