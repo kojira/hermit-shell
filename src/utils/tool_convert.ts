@@ -79,6 +79,7 @@ export interface AnthropicToolUseBlock {
 export interface AnthropicTextBlock {
   type: "text";
   text: string;
+  [key: string]: unknown;
 }
 
 export interface AnthropicImageBlock {
@@ -339,7 +340,7 @@ export function convertResponseWithTools(
  */
 function convertPartToAnthropic(part: any): AnthropicContentBlock {
   if (part?.type === "text") {
-    return { type: "text", text: part.text ?? "" };
+    return { ...part, type: "text", text: part.text ?? "" };
   }
   if (part?.type === "image_url") {
     const url: string = part.image_url?.url ?? "";
