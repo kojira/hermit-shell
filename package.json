@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "tsc && node --test dist/utils/tool_convert.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
