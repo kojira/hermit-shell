@@ -65,7 +65,8 @@ export interface AnthropicTool {
 export interface AnthropicToolResultBlock {
   type: "tool_result";
   tool_use_id: string;
-  content: string;
+  // 画像を含むマルチパートの tool 結果はブロックの並びで渡すため、文字列だけではない。
+  content: string | AnthropicContentBlock[];
 }
 
 export interface AnthropicToolUseBlock {
@@ -79,6 +80,16 @@ export interface AnthropicTextBlock {
   type: "text";
   text: string;
 }
+
+export interface AnthropicImageBlock {
+  type: "image";
+  source:
+    | { type: "base64"; media_type: string; data: string }
+    | { type: "url"; url: string };
+}
+
+/** user メッセージと tool_result の content に入れられるブロック。 */
+export type AnthropicContentBlock = AnthropicTextBlock | AnthropicImageBlock;
 
 // ---------------------------------------------------------------------------
 // Conversion: OpenAI tools → Anthropic tools
@@ -168,29 +179,25 @@ export function openaiMessagesToAnthropic(
       // Tool result → user message with tool_result block.
       // content が配列（マルチパート）のときも user と同じ変換を通す——image_url を
       // Anthropic の image ブロックへ（無変換で素通しすると Anthropic が 400 を返す）。
-      const toolContent = Array.isArray(msg.content)
+      const toolContent: string | AnthropicContentBlock[] = Array.isArray(msg.content)
         ? msg.content.map(convertPartToAnthropic)
         : (msg.content ?? "");
-      result.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: msg.tool_call_id ?? "",
-            content: toolContent,
-          } as AnthropicToolResultBlock,
-        ],
-      });
+      const toolResult: AnthropicToolResultBlock = {
+        type: "tool_result",
+        tool_use_id: msg.tool_call_id ?? "",
+        content: toolContent,
+      };
+      result.push({ role: "user", content: [toolResult] });
     } else {
       // user message
-      let anthropicContent: unknown;
+      let anthropicContent: string | AnthropicContentBlock[];
       if (Array.isArray(msg.content)) {
         // Convert OpenAI ContentParts to Anthropic format
         anthropicContent = msg.content.map(convertPartToAnthropic);
       } else {
         anthropicContent = msg.content ?? "";
       }
-      result.push({ role: "user", content: anthropicContent as any });
+      result.push({ role: "user", content: anthropicContent });
     }
   }
 
@@ -330,7 +337,7 @@ export function convertResponseWithTools(
  *   url ソースは http(s) のみで data: を受けない）、http(s) は url ソースに写す。
  * - 知らない type は素通し（Anthropic 側が明確な 400 で知らせる——ここで黙って捨てない）。
  */
-function convertPartToAnthropic(part: any): any {
+function convertPartToAnthropic(part: any): AnthropicContentBlock {
   if (part?.type === "text") {
     return { type: "text", text: part.text ?? "" };
   }
@@ -345,5 +352,6 @@ function convertPartToAnthropic(part: any): any {
     }
     return { type: "image", source: { type: "url", url } };
   }
-  return part;
+  // 素通しの一手だけ型を跨ぐ。捨てるより Anthropic の 400 で気づく方が良い（上の doc 参照）。
+  return part as AnthropicContentBlock;
 }
