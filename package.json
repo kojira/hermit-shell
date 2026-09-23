@@ -6,7 +6,7 @@
     "build": "tsc",
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
-    "test": "tsc && node --test dist/utils/tool_convert.test.js dist/utils/setup_token_flow.test.js"
+    "test": "tsc && node --test dist/utils/tool_convert.test.js dist/utils/setup_token_flow.test.js dist/handlers/models.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
