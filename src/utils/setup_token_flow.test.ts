@@ -125,6 +125,19 @@ test("captures a split setup token internally, verifies, applies, and never expo
   }
 });
 
+test("reassembles a terminal-wrapped 108-character setup token", async () => {
+  const wrappedToken = `sk-ant-oat01-${"b".repeat(95)}`;
+  const { flow, child, applied } = makeFlow();
+  flow.start();
+  child.stdout.emit(
+    "data",
+    Buffer.from(`${wrappedToken.slice(0, 76)}\r\n${wrappedToken.slice(76)}\r\n`)
+  );
+  child.emit("close", 0, null);
+  await settle();
+  assert.deepEqual(applied, [wrappedToken]);
+});
+
 test("publishes only the official Claude authentication URL while waiting", () => {
   const { flow, child } = makeFlow();
   flow.start();

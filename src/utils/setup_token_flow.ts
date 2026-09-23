@@ -44,6 +44,8 @@ interface SetupTokenFlowDependencies {
 }
 
 const TOKEN_PATTERN = /sk-ant-oat01-[A-Za-z0-9_-]{20,1024}/;
+const SETUP_TOKEN_LENGTH = 108;
+const SETUP_TOKEN_SUFFIX_LENGTH = SETUP_TOKEN_LENGTH - "sk-ant-oat01-".length;
 const URL_PATTERN = /https:\/\/[^\s\x00-\x1f\x7f]+/g;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 const AUTH_CODE_FAILURE_PHRASES = [
@@ -55,6 +57,15 @@ const AUTH_CODE_FAILURE_PHRASES = [
 
 function stripAnsi(value: string): string {
   return value.replace(ANSI_PATTERN, "");
+}
+
+function extractSetupToken(value: string): string | null {
+  const compact = value.replace(/\s/g, "");
+  const fixedLength = compact.match(
+    new RegExp(`sk-ant-oat01-[A-Za-z0-9_-]{${SETUP_TOKEN_SUFFIX_LENGTH}}`)
+  );
+  if (fixedLength) return fixedLength[0];
+  return value.match(TOKEN_PATTERN)?.[0] ?? null;
 }
 
 function officialClaudeAuthUrl(value: string): string | null {
@@ -284,7 +295,7 @@ export class ClaudeSetupTokenFlow {
       bytes >= 64 &&
       !/(error|failed|retry)/.test(lower) &&
       !lower.includes("/oauth/authorize") &&
-      !TOKEN_PATTERN.test(clean);
+      !extractSetupToken(clean);
     if (
       this.current.state === "waiting_for_cli" &&
       !this.continuedAfterSuccessPrompt &&
@@ -302,11 +313,11 @@ export class ClaudeSetupTokenFlow {
       }
     }
 
-    const match = clean.match(TOKEN_PATTERN);
-    if (match) {
-      this.capturedToken = match[0];
+    const token = extractSetupToken(clean);
+    if (token) {
+      this.capturedToken = token;
       this.scanTail = "";
-      this.trace("final_token_detected");
+      this.trace("final_token_detected", { length: token.length });
     } else {
       this.scanTail = raw.slice(-2_048);
     }
@@ -384,7 +395,7 @@ export class ClaudeSetupTokenFlow {
     }
     if (/error|failed/i.test(chunkText)) classifications.push("error_text");
     if (/retry/i.test(chunkText)) classifications.push("retry_prompt");
-    if (TOKEN_PATTERN.test(stripAnsi(chunkText))) classifications.push("final_token");
+    if (extractSetupToken(stripAnsi(chunkText))) classifications.push("final_token");
     if (AUTH_CODE_FAILURE_PHRASES.some((phrase) => chunkText.includes(phrase))) {
       classifications.push("auth_code_failure");
     }
