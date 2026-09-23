@@ -87,6 +87,9 @@ export class ClaudeSetupTokenFlow {
   private capturedToken: string | null = null;
   private codeForwarded = false;
   private outputAfterCodeForwarded = false;
+  private attemptId = 0;
+  private attemptStartedAt = 0;
+  private chunkSequence = 0;
   private finished = false;
 
   constructor(deps: SetupTokenFlowDependencies) {
@@ -105,10 +108,15 @@ export class ClaudeSetupTokenFlow {
     | { submitted: true }
     | { submitted: false; reason: "not_waiting" | "invalid_code" | "write_failed" } {
     if (this.current.state !== "waiting_for_user" || !this.child) {
+      this.trace("code_submit_rejected", { reason: "not_waiting", state: this.current.state });
       return { submitted: false, reason: "not_waiting" };
     }
     const trimmed = code.trim();
     if (!trimmed || Buffer.byteLength(trimmed) > 4_096) {
+      this.trace("code_submit_rejected", {
+        reason: "invalid_code",
+        length: trimmed.length,
+      });
       return { submitted: false, reason: "invalid_code" };
     }
     try {
@@ -121,7 +129,7 @@ export class ClaudeSetupTokenFlow {
       });
       return { submitted: true };
     } catch {
-      this.fail("Claude認証コードを送信できませんでした");
+      this.fail("Claude認証コードを送信できませんでした", true, "stdin_write_failed");
       return { submitted: false, reason: "write_failed" };
     }
   }
@@ -140,21 +148,24 @@ export class ClaudeSetupTokenFlow {
     try {
       child = this.deps.spawn();
     } catch {
-      this.fail("Claude認証を開始できませんでした");
+      this.fail("Claude認証を開始できませんでした", true, "spawn_failed");
       return { started: true };
     }
 
     this.child = child;
     this.current = { state: "waiting_for_user" };
     this.trace("flow_started");
-    child.stdout.on("data", (chunk) => this.acceptOutput(chunk));
-    child.stderr.on("data", (chunk) => this.acceptOutput(chunk));
-    child.on("error", () => this.fail("Claude認証を開始できませんでした"));
+    child.stdout.on("data", (chunk) => this.acceptOutput(chunk, "stdout"));
+    child.stderr.on("data", (chunk) => this.acceptOutput(chunk, "stderr"));
+    child.on("error", () => {
+      this.trace("cli_process_error");
+      this.fail("Claude認証を開始できませんでした", true, "child_error");
+    });
     child.on("close", (code) => void this.handleClose(code));
-    this.timer = setTimeout(
-      () => this.fail("Claude認証が時間切れになりました"),
-      this.deps.timeoutMs
-    );
+    this.timer = setTimeout(() => {
+      this.trace("flow_timeout", { timeoutMs: this.deps.timeoutMs });
+      this.fail("Claude認証が時間切れになりました", true, "timeout");
+    }, this.deps.timeoutMs);
     this.timer.unref?.();
     return { started: true };
   }
@@ -164,6 +175,9 @@ export class ClaudeSetupTokenFlow {
     this.child = null;
     this.outputBytes = 0;
     this.scanTail = "";
+    this.attemptId += 1;
+    this.attemptStartedAt = Date.now();
+    this.chunkSequence = 0;
     this.bestAuthUrlQueryKeys = 0;
     this.capturedToken = null;
     this.codeForwarded = false;
@@ -171,17 +185,20 @@ export class ClaudeSetupTokenFlow {
     this.finished = false;
   }
 
-  private acceptOutput(chunk: Buffer | string): void {
+  private acceptOutput(chunk: Buffer | string, stream: "stdout" | "stderr"): void {
     if (this.finished) return;
+    const chunkText = chunk.toString();
     const bytes = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
     this.outputBytes += bytes;
+    this.chunkSequence += 1;
+    this.trace("cli_output", this.describeChunk(chunkText, stream, bytes));
     if (this.outputBytes > this.deps.maxOutputBytes) {
-      this.fail("Claude認証の出力上限を超えました");
+      this.fail("Claude認証の出力上限を超えました", true, "output_limit");
       return;
     }
 
     if (this.capturedToken) return;
-    const raw = this.scanTail + chunk.toString();
+    const raw = this.scanTail + chunkText;
     const authUrl = officialClaudeAuthUrl(raw);
     if (
       authUrl &&
@@ -199,7 +216,12 @@ export class ClaudeSetupTokenFlow {
     }
 
     const clean = stripAnsi(raw);
-    const chunkText = chunk.toString();
+    if (chunkText.includes("HERMIT_AUTH_CODE_SEND_BEGIN")) {
+      this.trace("code_send_begin");
+    }
+    if (chunkText.includes("HERMIT_AUTH_CODE_ENTER_SENT")) {
+      this.trace("enter_sent");
+    }
     if (chunkText.includes("HERMIT_AUTH_CODE_FORWARDED")) {
       if (!this.codeForwarded) this.trace("code_forwarded");
       this.codeForwarded = true;
@@ -212,7 +234,11 @@ export class ClaudeSetupTokenFlow {
       AUTH_CODE_FAILURE_PHRASES.some((phrase) => clean.includes(phrase))
     ) {
       this.trace("authorization_code_rejected");
-      this.fail("Claude認証コードが無効または期限切れです。もう一度認証してください。");
+      this.fail(
+        "Claude認証コードが無効または期限切れです。もう一度認証してください。",
+        true,
+        "authorization_code_rejected"
+      );
       return;
     }
 
@@ -231,7 +257,7 @@ export class ClaudeSetupTokenFlow {
     this.trace("cli_closed", { code });
     this.clearTimer();
     if (code !== 0 || !this.capturedToken) {
-      this.fail("Claude認証を完了できませんでした", false);
+      this.fail("Claude認証を完了できませんでした", false, "cli_exit_without_token");
       return;
     }
 
@@ -244,7 +270,7 @@ export class ClaudeSetupTokenFlow {
       const verified = await this.deps.verify(token);
       if (!verified.ok) {
         this.trace("verification_failed", { status: verified.status ?? null });
-        this.fail("Claude認証の検証に失敗しました", false);
+        this.fail("Claude認証の検証に失敗しました", false, "verification_failed");
         return;
       }
       this.trace("verification_succeeded");
@@ -255,11 +281,11 @@ export class ClaudeSetupTokenFlow {
       this.child = null;
       this.current = { state: "success" };
     } catch {
-      this.fail("Claude認証を適用できませんでした", false);
+      this.fail("Claude認証を適用できませんでした", false, "apply_failed");
     }
   }
 
-  private fail(message: string, kill = true): void {
+  private fail(message: string, kill = true, reason = "unspecified"): void {
     if (this.finished) return;
     this.finished = true;
     this.clearTimer();
@@ -275,6 +301,55 @@ export class ClaudeSetupTokenFlow {
       }
     }
     this.current = { state: "error", message };
+    this.trace("flow_failed", { reason, childTerminated: kill && Boolean(child) });
+  }
+
+  private describeChunk(
+    chunkText: string,
+    stream: "stdout" | "stderr",
+    bytes: number
+  ): Record<string, unknown> {
+    const classifications: string[] = [];
+    if (chunkText.includes("https://claude.com/cai/oauth/authorize")) classifications.push("oauth_url");
+    if (chunkText.includes("Browser didn't open?")) classifications.push("browser_prompt");
+    if (chunkText.includes("HERMIT_AUTH_CODE_SEND_BEGIN")) classifications.push("send_begin");
+    if (chunkText.includes("HERMIT_AUTH_CODE_ENTER_SENT")) classifications.push("enter_sent");
+    if (chunkText.includes("HERMIT_AUTH_CODE_FORWARDED")) classifications.push("forwarded");
+    if (chunkText.includes("OAuth error: Request failed with status code 400")) classifications.push("oauth_400");
+    if (chunkText.includes("Press Enter to retry")) classifications.push("retry_prompt");
+    if (TOKEN_PATTERN.test(stripAnsi(chunkText))) classifications.push("final_token");
+    if (AUTH_CODE_FAILURE_PHRASES.some((phrase) => chunkText.includes(phrase))) {
+      classifications.push("auth_code_failure");
+    }
+    const chars = Array.from(chunkText);
+    const controlChars = chars.filter((char) => {
+      const code = char.charCodeAt(0);
+      return code < 32 || code === 127;
+    }).length;
+    const urlCandidates = (chunkText.match(URL_PATTERN) ?? []).flatMap((candidate) => {
+      try {
+        const url = new URL(candidate);
+        if (url.hostname !== "claude.com" || url.pathname !== "/cai/oauth/authorize") return [];
+        return [{ length: candidate.length, queryKeys: url.searchParams.size }];
+      } catch {
+        return [];
+      }
+    });
+    return {
+      sequence: this.chunkSequence,
+      stream,
+      state: this.current.state,
+      bytes,
+      totalBytes: this.outputBytes,
+      chars: chars.length,
+      printableChars: chars.length - controlChars,
+      controlChars,
+      carriageReturns: chars.filter((char) => char === "\r").length,
+      lineFeeds: chars.filter((char) => char === "\n").length,
+      ansiSequences: chunkText.match(ANSI_PATTERN)?.length ?? 0,
+      classifications,
+      urlCandidates,
+    };
   }
 
   private clearTimer(): void {
@@ -283,7 +358,15 @@ export class ClaudeSetupTokenFlow {
   }
 
   private trace(event: string, details: Record<string, unknown> = {}): void {
-    console.info("[hermit-claude-setup]", JSON.stringify({ event, ...details }));
+    console.info(
+      "[hermit-claude-setup]",
+      JSON.stringify({
+        attempt: this.attemptId,
+        elapsedMs: this.attemptStartedAt ? Date.now() - this.attemptStartedAt : 0,
+        event,
+        ...details,
+      })
+    );
   }
 }
 
@@ -318,8 +401,12 @@ proc forward_stdin {} {
     return
   }
   if {[gets stdin line] >= 0} {
+    puts "HERMIT_AUTH_CODE_SEND_BEGIN"
+    flush stdout
     send -- "$line\\r"
+    puts "HERMIT_AUTH_CODE_ENTER_SENT"
     puts "HERMIT_AUTH_CODE_FORWARDED"
+    flush stdout
   }
 }
 fileevent stdin readable forward_stdin

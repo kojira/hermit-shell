@@ -66,7 +66,12 @@ test("emits redacted lifecycle evidence without code, token, or OAuth query", as
       Buffer.from("https://claude.com/cai/oauth/authorize?secret=query\n")
     );
     flow.submitAuthorizationCode("browser-code#oauth-secret");
-    child.stdout.emit("data", Buffer.from("HERMIT_AUTH_CODE_FORWARDED\n"));
+    child.stdout.emit(
+      "data",
+      Buffer.from(
+        "HERMIT_AUTH_CODE_SEND_BEGIN\nHERMIT_AUTH_CODE_ENTER_SENT\nHERMIT_AUTH_CODE_FORWARDED\n"
+      )
+    );
     child.stdout.emit("data", Buffer.from(`${token}\n`));
     child.emit("close", 0, null);
     await settle();
@@ -76,6 +81,9 @@ test("emits redacted lifecycle evidence without code, token, or OAuth query", as
       "flow_started",
       "auth_url_ready",
       "code_submitted",
+      "cli_output",
+      "code_send_begin",
+      "enter_sent",
       "code_forwarded",
       "cli_output_after_code",
       "final_token_detected",
