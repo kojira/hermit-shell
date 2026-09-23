@@ -69,6 +69,25 @@ test("captures a split setup token internally, verifies, applies, and never expo
   }
 });
 
+test("publishes only the official Claude authentication URL while waiting", () => {
+  const { flow, child } = makeFlow();
+  flow.start();
+  child.stdout.emit("data", Buffer.from("https://example.com/oauth/authorize\n"));
+  assert.deepEqual(flow.status(), { state: "waiting_for_user" });
+
+  child.stdout.emit(
+    "data",
+    Buffer.from(
+      "Browser didn't open? \u001b]8;;https://claude.ai/oauth/authorize?code=true\u0007Sign in\u001b]8;;\u0007\n"
+    )
+  );
+
+  assert.deepEqual(flow.status(), {
+    state: "waiting_for_user",
+    authUrl: "https://claude.ai/oauth/authorize?code=true",
+  });
+});
+
 test("allows only one active browser authentication flow", () => {
   let spawns = 0;
   const { flow } = makeFlow({
@@ -152,6 +171,8 @@ test("setup page keeps manual entry and makes browser login explicitly human-ope
     assert.match(html, /Claudeで再認証/);
     assert.match(html, /ログイン・同意・2段階認証は、開いたブラウザでご自身が行います/);
     assert.match(html, /\/setup\/claude\/start/);
+    assert.match(html, /window\.open\('about:blank'/);
+    assert.match(html, /data\.authUrl/);
     assert.match(html, /トークンを手動入力/);
     assert.doesNotMatch(html, new RegExp(token));
   } finally {

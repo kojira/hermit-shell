@@ -17,7 +17,7 @@ export interface SetupTokenChild {
 
 export type SetupTokenState =
   | { state: "idle" }
-  | { state: "waiting_for_user" }
+  | { state: "waiting_for_user"; authUrl?: string }
   | { state: "verifying" }
   | { state: "success" }
   | { state: "error"; message: string };
@@ -38,10 +38,29 @@ interface SetupTokenFlowDependencies {
 }
 
 const TOKEN_PATTERN = /sk-ant-oat01-[A-Za-z0-9_-]{20,1024}/;
+const URL_PATTERN = /https:\/\/[^\s\x00-\x1f\x7f]+/g;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 
 function stripAnsi(value: string): string {
   return value.replace(ANSI_PATTERN, "");
+}
+
+function officialClaudeAuthUrl(value: string): string | null {
+  for (const candidate of value.match(URL_PATTERN) ?? []) {
+    try {
+      const url = new URL(candidate);
+      if (
+        url.protocol === "https:" &&
+        url.hostname === "claude.ai" &&
+        url.pathname === "/oauth/authorize"
+      ) {
+        return url.toString();
+      }
+    } catch {
+      // A partial URL can arrive in one chunk; the retained tail is retried next time.
+    }
+  }
+  return null;
 }
 
 export class ClaudeSetupTokenFlow {
@@ -114,13 +133,18 @@ export class ClaudeSetupTokenFlow {
     }
 
     if (this.capturedToken) return;
-    const text = stripAnsi(this.scanTail + chunk.toString());
-    const match = text.match(TOKEN_PATTERN);
+    const raw = this.scanTail + chunk.toString();
+    const authUrl = officialClaudeAuthUrl(raw);
+    if (authUrl && this.current.state === "waiting_for_user") {
+      this.current = { state: "waiting_for_user", authUrl };
+    }
+
+    const match = stripAnsi(raw).match(TOKEN_PATTERN);
     if (match) {
       this.capturedToken = match[0];
       this.scanTail = "";
     } else {
-      this.scanTail = text.slice(-2_048);
+      this.scanTail = raw.slice(-2_048);
     }
   }
 

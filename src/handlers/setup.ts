@@ -112,6 +112,7 @@ export function renderPage(): string {
   const claudeBtn = document.getElementById('claude-login');
   const claudeResult = document.getElementById('claude-result');
   let statusTimer = null;
+  let claudeAuthWindow = null;
 
   async function pollClaudeStatus() {
     try {
@@ -121,6 +122,10 @@ export function renderPage(): string {
         claudeResult.className = '';
         claudeResult.style.display = 'block';
         claudeResult.textContent = 'ブラウザでClaudeのログインと認可を完了してください。';
+        if (data.authUrl && claudeAuthWindow) {
+          claudeAuthWindow.location.replace(data.authUrl);
+          claudeAuthWindow = null;
+        }
       } else if (data.state === 'verifying') {
         claudeResult.textContent = '認証結果を検証中...';
       } else if (data.state === 'success') {
@@ -129,6 +134,8 @@ export function renderPage(): string {
         claudeBtn.disabled = false;
         clearInterval(statusTimer);
       } else if (data.state === 'error') {
+        if (claudeAuthWindow) claudeAuthWindow.close();
+        claudeAuthWindow = null;
         claudeResult.className = 'err';
         claudeResult.textContent = data.message || 'Claudeの再認証に失敗しました。';
         claudeBtn.disabled = false;
@@ -143,6 +150,7 @@ export function renderPage(): string {
   }
 
   claudeBtn.addEventListener('click', async () => {
+    claudeAuthWindow = window.open('about:blank', '_blank');
     claudeBtn.disabled = true;
     claudeResult.className = '';
     claudeResult.style.display = 'block';
@@ -151,6 +159,8 @@ export function renderPage(): string {
       const r = await fetch('/setup/claude/start', { method: 'POST' });
       const data = await r.json();
       if (!r.ok) {
+        if (claudeAuthWindow) claudeAuthWindow.close();
+        claudeAuthWindow = null;
         claudeResult.className = 'err';
         claudeResult.textContent = data.error || 'Claude認証を開始できませんでした。';
         claudeBtn.disabled = false;
@@ -159,6 +169,8 @@ export function renderPage(): string {
       await pollClaudeStatus();
       statusTimer = setInterval(pollClaudeStatus, 1000);
     } catch (_) {
+      if (claudeAuthWindow) claudeAuthWindow.close();
+      claudeAuthWindow = null;
       claudeResult.className = 'err';
       claudeResult.textContent = '通信エラー';
       claudeBtn.disabled = false;
