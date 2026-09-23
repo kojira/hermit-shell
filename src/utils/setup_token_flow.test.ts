@@ -182,6 +182,21 @@ test("submits the browser authorization code only to the active CLI stdin", () =
   });
 });
 
+test("continues past a successful CLI press-Enter prompt", () => {
+  const { flow, child } = makeFlow();
+  flow.start();
+  child.stdout.emit(
+    "data",
+    Buffer.from("https://claude.com/cai/oauth/authorize?code=true\n")
+  );
+  flow.submitAuthorizationCode("valid-code#valid-state");
+  child.stdout.emit(
+    "data",
+    Buffer.from("Authentication successful. Press Enter to continue.\n")
+  );
+  assert.deepEqual(child.stdin.writes, ["valid-code#valid-state\n", "\n"]);
+});
+
 test("returns from waiting_for_cli to a fresh official authorization URL", () => {
   const { flow, child } = makeFlow();
   flow.start();

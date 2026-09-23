@@ -87,6 +87,7 @@ export class ClaudeSetupTokenFlow {
   private capturedToken: string | null = null;
   private codeForwarded = false;
   private outputAfterCodeForwarded = false;
+  private continuedAfterSuccessPrompt = false;
   private attemptId = 0;
   private attemptStartedAt = 0;
   private chunkSequence = 0;
@@ -182,6 +183,7 @@ export class ClaudeSetupTokenFlow {
     this.capturedToken = null;
     this.codeForwarded = false;
     this.outputAfterCodeForwarded = false;
+    this.continuedAfterSuccessPrompt = false;
     this.finished = false;
   }
 
@@ -225,7 +227,14 @@ export class ClaudeSetupTokenFlow {
     if (chunkText.includes("HERMIT_AUTH_CODE_FORWARDED")) {
       if (!this.codeForwarded) this.trace("code_forwarded");
       this.codeForwarded = true;
-    } else if (this.codeForwarded && !this.outputAfterCodeForwarded) {
+    }
+    if (chunkText.includes("HERMIT_SUCCESS_CONTINUE_SEND_BEGIN")) {
+      this.trace("successful_prompt_continue_forwarded");
+    }
+    if (chunkText.includes("HERMIT_SUCCESS_CONTINUE_ENTER_SENT")) {
+      this.trace("successful_prompt_enter_forwarded");
+    }
+    if (!chunkText.includes("HERMIT_AUTH_CODE_FORWARDED") && this.codeForwarded && !this.outputAfterCodeForwarded) {
       this.outputAfterCodeForwarded = true;
       this.trace("cli_output_after_code", { bytes });
     }
@@ -240,6 +249,24 @@ export class ClaudeSetupTokenFlow {
         "authorization_code_rejected"
       );
       return;
+    }
+
+    const lower = clean.toLowerCase();
+    if (
+      this.current.state === "waiting_for_cli" &&
+      !this.continuedAfterSuccessPrompt &&
+      lower.includes("press enter") &&
+      !/(error|failed|retry)/.test(lower)
+    ) {
+      this.continuedAfterSuccessPrompt = true;
+      this.trace("successful_prompt_continue_started");
+      try {
+        this.child?.stdin.write("\n");
+        this.trace("successful_prompt_enter_sent");
+      } catch {
+        this.fail("Claude認証を完了できませんでした", true, "continue_write_failed");
+        return;
+      }
     }
 
     const match = clean.match(TOKEN_PATTERN);
@@ -315,8 +342,15 @@ export class ClaudeSetupTokenFlow {
     if (chunkText.includes("HERMIT_AUTH_CODE_SEND_BEGIN")) classifications.push("send_begin");
     if (chunkText.includes("HERMIT_AUTH_CODE_ENTER_SENT")) classifications.push("enter_sent");
     if (chunkText.includes("HERMIT_AUTH_CODE_FORWARDED")) classifications.push("forwarded");
+    if (chunkText.includes("HERMIT_SUCCESS_CONTINUE_SEND_BEGIN")) classifications.push("continue_send_begin");
+    if (chunkText.includes("HERMIT_SUCCESS_CONTINUE_ENTER_SENT")) classifications.push("continue_enter_sent");
     if (chunkText.includes("OAuth error: Request failed with status code 400")) classifications.push("oauth_400");
-    if (chunkText.includes("Press Enter to retry")) classifications.push("retry_prompt");
+    if (/press enter/i.test(chunkText)) classifications.push("press_enter_prompt");
+    if (/authentication successful|successfully authenticated/i.test(chunkText)) {
+      classifications.push("authentication_success");
+    }
+    if (/error|failed/i.test(chunkText)) classifications.push("error_text");
+    if (/retry/i.test(chunkText)) classifications.push("retry_prompt");
     if (TOKEN_PATTERN.test(stripAnsi(chunkText))) classifications.push("final_token");
     if (AUTH_CODE_FAILURE_PHRASES.some((phrase) => chunkText.includes(phrase))) {
       classifications.push("auth_code_failure");
@@ -401,12 +435,20 @@ proc forward_stdin {} {
     return
   }
   if {[gets stdin line] >= 0} {
-    puts "HERMIT_AUTH_CODE_SEND_BEGIN"
-    flush stdout
-    send -- "$line\\r"
-    puts "HERMIT_AUTH_CODE_ENTER_SENT"
-    puts "HERMIT_AUTH_CODE_FORWARDED"
-    flush stdout
+    if {$line eq ""} {
+      puts "HERMIT_SUCCESS_CONTINUE_SEND_BEGIN"
+      flush stdout
+      send -- "\\r"
+      puts "HERMIT_SUCCESS_CONTINUE_ENTER_SENT"
+      flush stdout
+    } else {
+      puts "HERMIT_AUTH_CODE_SEND_BEGIN"
+      flush stdout
+      send -- "$line\\r"
+      puts "HERMIT_AUTH_CODE_ENTER_SENT"
+      puts "HERMIT_AUTH_CODE_FORWARDED"
+      flush stdout
+    }
   }
 }
 fileevent stdin readable forward_stdin
