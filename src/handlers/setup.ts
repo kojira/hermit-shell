@@ -99,6 +99,7 @@ export function renderPage(): string {
   <p>Claudeのログイン・同意・2段階認証は、開いたブラウザでご自身が行います。hermit-shellは認証完了後にClaude CLIが発行したセットアップトークンだけを内部で検証・適用し、画面やログには表示しません。</p>
   <button id="claude-login">Claudeで再認証</button>
   <div id="claude-code-area" style="display:none; margin-top:16px">
+    <p><a id="claude-auth-link" href="#" target="_blank" rel="noopener" style="display:none">Claude公式認証ページを開く</a></p>
     <label for="claude-code">Claude認証コード（セットアップトークンではありません）</label>
     <input id="claude-code" type="password" autocomplete="off" placeholder="Claude公式ページの「コードをコピー」から貼り付け">
     <button id="claude-code-submit">Claudeへ続行</button>
@@ -116,6 +117,7 @@ export function renderPage(): string {
 <script>
   const claudeBtn = document.getElementById('claude-login');
   const claudeCodeArea = document.getElementById('claude-code-area');
+  const claudeAuthLink = document.getElementById('claude-auth-link');
   const claudeCodeInput = document.getElementById('claude-code');
   const claudeCodeSubmit = document.getElementById('claude-code-submit');
   const claudeResult = document.getElementById('claude-result');
@@ -135,10 +137,14 @@ export function renderPage(): string {
             claudeAuthWindow.location.replace(data.authUrl);
             claudeAuthWindow = null;
           }
+          claudeAuthLink.href = data.authUrl;
+          claudeAuthLink.style.display = 'inline-block';
+          claudeCodeSubmit.disabled = false;
           claudeCodeArea.style.display = 'block';
         }
       } else if (data.state === 'waiting_for_cli') {
         claudeResult.textContent = 'Claude CLIで認証を完了しています...';
+        claudeAuthLink.style.display = 'none';
         claudeCodeArea.style.display = 'none';
       } else if (data.state === 'verifying') {
         claudeResult.textContent = '認証結果を検証中...';
@@ -169,6 +175,8 @@ export function renderPage(): string {
     claudeAuthWindow = window.open('about:blank', '_blank');
     claudeBtn.disabled = true;
     claudeCodeSubmit.disabled = false;
+    claudeAuthLink.href = '#';
+    claudeAuthLink.style.display = 'none';
     claudeResult.className = '';
     claudeResult.style.display = 'block';
     claudeResult.textContent = 'Claude認証を開始しています...';

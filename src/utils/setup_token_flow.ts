@@ -46,6 +46,11 @@ interface SetupTokenFlowDependencies {
 const TOKEN_PATTERN = /sk-ant-oat01-[A-Za-z0-9_-]{20,1024}/;
 const URL_PATTERN = /https:\/\/[^\s\x00-\x1f\x7f]+/g;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
+const AUTH_CODE_FAILURE_PHRASES = [
+  "Authentication failed: Invalid authorization code",
+  "Token exchange failed (",
+  "Failed to exchange authorization code for access token. Please try again.",
+];
 
 function stripAnsi(value: string): string {
   return value.replace(ANSI_PATTERN, "");
@@ -104,6 +109,7 @@ export class ClaudeSetupTokenFlow {
     }
     try {
       this.child.stdin.write(`${trimmed}\n`);
+      this.scanTail = "";
       this.current = { state: "waiting_for_cli" };
       return { submitted: true };
     } catch {
@@ -165,11 +171,23 @@ export class ClaudeSetupTokenFlow {
     if (this.capturedToken) return;
     const raw = this.scanTail + chunk.toString();
     const authUrl = officialClaudeAuthUrl(raw);
-    if (authUrl && this.current.state === "waiting_for_user") {
+    if (
+      authUrl &&
+      (this.current.state === "waiting_for_user" || this.current.state === "waiting_for_cli")
+    ) {
       this.current = { state: "waiting_for_user", authUrl };
     }
 
-    const match = stripAnsi(raw).match(TOKEN_PATTERN);
+    const clean = stripAnsi(raw);
+    if (
+      this.current.state === "waiting_for_cli" &&
+      AUTH_CODE_FAILURE_PHRASES.some((phrase) => clean.includes(phrase))
+    ) {
+      this.fail("Claude認証コードが無効または期限切れです。もう一度認証してください。");
+      return;
+    }
+
+    const match = clean.match(TOKEN_PATTERN);
     if (match) {
       this.capturedToken = match[0];
       this.scanTail = "";

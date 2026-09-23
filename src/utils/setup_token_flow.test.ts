@@ -122,6 +122,55 @@ test("submits the browser authorization code only to the active CLI stdin", () =
   });
 });
 
+test("returns from waiting_for_cli to a fresh official authorization URL", () => {
+  const { flow, child } = makeFlow();
+  flow.start();
+  child.stdout.emit(
+    "data",
+    Buffer.from("https://claude.com/cai/oauth/authorize?attempt=first\n")
+  );
+  assert.deepEqual(flow.submitAuthorizationCode("expired-code#state"), {
+    submitted: true,
+  });
+  assert.deepEqual(flow.status(), { state: "waiting_for_cli" });
+
+  child.stdout.emit(
+    "data",
+    Buffer.from("https://claude.com/cai/oauth/authorize?attempt=retry\n")
+  );
+  assert.deepEqual(flow.status(), {
+    state: "waiting_for_user",
+    authUrl: "https://claude.com/cai/oauth/authorize?attempt=retry",
+  });
+});
+
+test("known invalid-code and token-exchange failures return only a generic retry error", () => {
+  for (const phrase of [
+    "Authentication failed: Invalid authorization code",
+    "Token exchange failed (401): Unauthorized",
+    "Failed to exchange authorization code for access token. Please try again.",
+  ]) {
+    const { flow, child } = makeFlow();
+    flow.start();
+    child.stdout.emit(
+      "data",
+      Buffer.from("https://claude.com/cai/oauth/authorize?attempt=first\n")
+    );
+    flow.submitAuthorizationCode("rejected-code#secret-state");
+    child.stderr.emit("data", Buffer.from(`\u001b[31m${phrase}\u001b[0m\n`));
+
+    assert.deepEqual(flow.status(), {
+      state: "error",
+      message: "Claude認証コードが無効または期限切れです。もう一度認証してください。",
+    });
+    assert.equal(child.killed, true);
+    assert.doesNotMatch(
+      JSON.stringify(publicSetupTokenStatus(flow.status())),
+      /rejected-code|secret-state|Invalid authorization code|Token exchange/
+    );
+  }
+});
+
 test("forces the CLI to emit its fallback URL in a usable PTY", () => {
   const env = claudeSetupEnvironment({
     PATH: "/example/bin",
@@ -221,6 +270,8 @@ test("setup page keeps manual entry and makes browser login explicitly human-ope
     assert.match(html, /\/setup\/claude\/start/);
     assert.match(html, /window\.open\('about:blank'/);
     assert.match(html, /data\.authUrl/);
+    assert.match(html, /id="claude-auth-link"/);
+    assert.match(html, /Claude公式認証ページを開く/);
     assert.match(html, /認証コード/);
     assert.match(html, /\/setup\/claude\/code/);
     assert.match(html, /Claudeへ続行/);
