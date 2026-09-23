@@ -50,6 +50,7 @@ const AUTH_CODE_FAILURE_PHRASES = [
   "Authentication failed: Invalid authorization code",
   "Token exchange failed (",
   "Failed to exchange authorization code for access token. Please try again.",
+  "OAuth error: Request failed with status code 400",
 ];
 
 function stripAnsi(value: string): string {
@@ -82,6 +83,7 @@ export class ClaudeSetupTokenFlow {
   private timer: NodeJS.Timeout | null = null;
   private outputBytes = 0;
   private scanTail = "";
+  private bestAuthUrlQueryKeys = 0;
   private capturedToken: string | null = null;
   private codeForwarded = false;
   private outputAfterCodeForwarded = false;
@@ -162,6 +164,7 @@ export class ClaudeSetupTokenFlow {
     this.child = null;
     this.outputBytes = 0;
     this.scanTail = "";
+    this.bestAuthUrlQueryKeys = 0;
     this.capturedToken = null;
     this.codeForwarded = false;
     this.outputAfterCodeForwarded = false;
@@ -184,9 +187,15 @@ export class ClaudeSetupTokenFlow {
       authUrl &&
       (this.current.state === "waiting_for_user" || this.current.state === "waiting_for_cli")
     ) {
-      const retry = this.current.state === "waiting_for_cli";
-      this.current = { state: "waiting_for_user", authUrl };
-      this.trace("auth_url_ready", { retry });
+      const queryKeys = new URL(authUrl).searchParams.size;
+      if (queryKeys >= this.bestAuthUrlQueryKeys) {
+        const retry = this.current.state === "waiting_for_cli";
+        this.bestAuthUrlQueryKeys = queryKeys;
+        this.current = { state: "waiting_for_user", authUrl };
+        this.trace("auth_url_ready", { retry, queryKeys });
+      } else {
+        this.trace("partial_auth_url_ignored", { queryKeys });
+      }
     }
 
     const clean = stripAnsi(raw);

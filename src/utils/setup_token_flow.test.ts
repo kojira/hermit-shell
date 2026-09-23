@@ -136,6 +136,20 @@ test("publishes only the official Claude authentication URL while waiting", () =
   });
 });
 
+test("does not replace a complete OAuth URL with its wrapped partial prefix", () => {
+  const { flow, child } = makeFlow();
+  flow.start();
+  const complete =
+    "https://claude.com/cai/oauth/authorize?code=true&client_id=client&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=challenge&code_challenge_method=S256&state=state";
+  child.stdout.emit("data", Buffer.from(`${complete}\n`));
+  child.stdout.emit("data", Buffer.from("x".repeat(3_000)));
+  child.stdout.emit(
+    "data",
+    Buffer.from("https://claude.com/cai/oauth/authorize?code=true&client_id=client\n")
+  );
+  assert.deepEqual(flow.status(), { state: "waiting_for_user", authUrl: complete });
+});
+
 test("submits the browser authorization code only to the active CLI stdin", () => {
   const { flow, child } = makeFlow();
   assert.deepEqual(flow.submitAuthorizationCode("before-start"), {
@@ -187,6 +201,7 @@ test("known invalid-code and token-exchange failures return only a generic retry
     "Authentication failed: Invalid authorization code",
     "Token exchange failed (401): Unauthorized",
     "Failed to exchange authorization code for access token. Please try again.",
+    "OAuth error: Request failed with status code 400",
   ]) {
     const { flow, child } = makeFlow();
     flow.start();
