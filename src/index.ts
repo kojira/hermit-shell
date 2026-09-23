@@ -2,6 +2,7 @@ import app from "./server";
 import { resolveAuth } from "./utils/auth";
 
 const PORT = parseInt(process.env.PORT || "8765", 10);
+const HOST = process.env.HOST || "127.0.0.1";
 
 const AUTH_LABELS: Record<string, string> = {
   "env-api-key": "ANTHROPIC_API_KEY env var (x-api-key)",
@@ -9,8 +10,8 @@ const AUTH_LABELS: Record<string, string> = {
   none: "No auth configured, API calls may fail",
 };
 
-app.listen(PORT, () => {
-  console.log(`Claude proxy server running on http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`Claude proxy server running on http://${HOST}:${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Models: http://localhost:${PORT}/v1/models`);
   console.log(`Chat: POST http://localhost:${PORT}/v1/chat/completions`);
