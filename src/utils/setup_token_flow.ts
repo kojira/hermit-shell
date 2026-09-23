@@ -200,6 +200,16 @@ export class ClaudeSetupTokenFlow {
   }
 }
 
+export function claudeSetupEnvironment(
+  source: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  return {
+    ...source,
+    BROWSER: "false",
+    TERM: source.TERM || "xterm-256color",
+  };
+}
+
 export function spawnOfficialClaudeSetupToken(): SetupTokenChild {
   const configured = process.env.HERMIT_CLAUDE_BIN;
   const claudeBin = configured || path.join(os.homedir(), ".local", "bin", "claude");
@@ -214,7 +224,7 @@ export function spawnOfficialClaudeSetupToken(): SetupTokenChild {
     "/usr/bin/script",
     ["-q", "/dev/null", claudeBin, "setup-token"],
     {
-      env: process.env,
+      env: claudeSetupEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],
     }
   );

@@ -5,6 +5,7 @@ import { renderPage } from "../handlers/setup";
 import {
   ClaudeSetupTokenFlow,
   SetupTokenChild,
+  claudeSetupEnvironment,
   publicSetupTokenStatus,
 } from "./setup_token_flow";
 
@@ -86,6 +87,13 @@ test("publishes only the official Claude authentication URL while waiting", () =
     state: "waiting_for_user",
     authUrl: "https://claude.com/cai/oauth/authorize?code=true",
   });
+});
+
+test("forces the CLI to emit its fallback URL in a usable PTY", () => {
+  const env = claudeSetupEnvironment({ PATH: "/example/bin" });
+  assert.equal(env.PATH, "/example/bin");
+  assert.equal(env.BROWSER, "false");
+  assert.equal(env.TERM, "xterm-256color");
 });
 
 test("allows only one active browser authentication flow", () => {
