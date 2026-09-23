@@ -254,7 +254,7 @@ export function claudeSetupEnvironment(
 
 const EXPECT_SETUP_TOKEN_SCRIPT = `
 set timeout -1
-spawn -noecho $env(HERMIT_CLAUDE_EXECUTABLE) setup-token
+spawn -noecho -nottycopy -nottyinit $env(HERMIT_CLAUDE_EXECUTABLE) setup-token
 proc forward_stdin {} {
   if {[eof stdin]} {
     fileevent stdin readable {}
