@@ -31,6 +31,8 @@ export function getAnthropicAuthToken(): string | null {
   return null;
 }
 
+export const CLAUDE_CLI_USER_AGENT = "claude-cli/2.1.280";
+
 const BASE_BETA = "fine-grained-tool-streaming-2025-05-14";
 const OAUTH_BETA = `claude-code-20250219,oauth-2025-04-20,${BASE_BETA},interleaved-thinking-2025-05-14`;
 
@@ -46,7 +48,7 @@ function buildAuthTokenClient(authToken: string) {
     authToken,
     defaultHeaders: {
       "anthropic-beta": OAUTH_BETA,
-      "user-agent": "claude-cli/2.1.62",
+      "user-agent": CLAUDE_CLI_USER_AGENT,
       "x-app": "cli",
     },
   });
