@@ -203,11 +203,23 @@ export class ClaudeSetupTokenFlow {
 export function claudeSetupEnvironment(
   source: NodeJS.ProcessEnv = process.env
 ): NodeJS.ProcessEnv {
-  return {
-    ...source,
+  const env: NodeJS.ProcessEnv = {
     BROWSER: "false",
-    TERM: source.TERM || "xterm-256color",
+    TERM: "xterm-256color",
   };
+  for (const name of [
+    "HOME",
+    "PATH",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+  ]) {
+    if (source[name] !== undefined) env[name] = source[name];
+  }
+  return env;
 }
 
 export function spawnOfficialClaudeSetupToken(): SetupTokenChild {

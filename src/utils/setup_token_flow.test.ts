@@ -90,10 +90,17 @@ test("publishes only the official Claude authentication URL while waiting", () =
 });
 
 test("forces the CLI to emit its fallback URL in a usable PTY", () => {
-  const env = claudeSetupEnvironment({ PATH: "/example/bin" });
+  const env = claudeSetupEnvironment({
+    PATH: "/example/bin",
+    TERM: "dumb",
+    ANTHROPIC_AUTH_TOKEN: "must-not-be-inherited",
+    CLAUDE_CODE_ENTRYPOINT: "must-not-be-inherited",
+  });
   assert.equal(env.PATH, "/example/bin");
   assert.equal(env.BROWSER, "false");
   assert.equal(env.TERM, "xterm-256color");
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
 });
 
 test("allows only one active browser authentication flow", () => {
