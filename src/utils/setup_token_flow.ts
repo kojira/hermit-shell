@@ -83,6 +83,8 @@ export class ClaudeSetupTokenFlow {
   private outputBytes = 0;
   private scanTail = "";
   private capturedToken: string | null = null;
+  private codeForwarded = false;
+  private outputAfterCodeForwarded = false;
   private finished = false;
 
   constructor(deps: SetupTokenFlowDependencies) {
@@ -111,7 +113,10 @@ export class ClaudeSetupTokenFlow {
       this.child.stdin.write(`${trimmed}\n`);
       this.scanTail = "";
       this.current = { state: "waiting_for_cli" };
-      this.trace("code_submitted");
+      this.trace("code_submitted", {
+        length: trimmed.length,
+        hasStateSeparator: trimmed.includes("#"),
+      });
       return { submitted: true };
     } catch {
       this.fail("Claude認証コードを送信できませんでした");
@@ -158,6 +163,8 @@ export class ClaudeSetupTokenFlow {
     this.outputBytes = 0;
     this.scanTail = "";
     this.capturedToken = null;
+    this.codeForwarded = false;
+    this.outputAfterCodeForwarded = false;
     this.finished = false;
   }
 
@@ -183,8 +190,13 @@ export class ClaudeSetupTokenFlow {
     }
 
     const clean = stripAnsi(raw);
-    if (clean.includes("HERMIT_AUTH_CODE_FORWARDED")) {
-      this.trace("code_forwarded");
+    const chunkText = chunk.toString();
+    if (chunkText.includes("HERMIT_AUTH_CODE_FORWARDED")) {
+      if (!this.codeForwarded) this.trace("code_forwarded");
+      this.codeForwarded = true;
+    } else if (this.codeForwarded && !this.outputAfterCodeForwarded) {
+      this.outputAfterCodeForwarded = true;
+      this.trace("cli_output_after_code", { bytes });
     }
     if (
       this.current.state === "waiting_for_cli" &&

@@ -77,6 +77,7 @@ test("emits redacted lifecycle evidence without code, token, or OAuth query", as
       "auth_url_ready",
       "code_submitted",
       "code_forwarded",
+      "cli_output_after_code",
       "final_token_detected",
       "cli_closed",
       "verification_started",
