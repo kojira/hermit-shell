@@ -237,7 +237,7 @@ export function spawnOfficialClaudeSetupToken(): SetupTokenChild {
     ["-q", "/dev/null", claudeBin, "setup-token"],
     {
       env: claudeSetupEnvironment(),
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
     }
   );
 }
