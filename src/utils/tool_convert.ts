@@ -5,6 +5,8 @@
  * convert.ts (変更不可) はtoolsを扱わないため、このファイルで補完する。
  */
 
+import { convertUsage } from "./usage";
+
 // ---------------------------------------------------------------------------
 // OpenAI types (input)
 // ---------------------------------------------------------------------------
@@ -320,14 +322,7 @@ export function convertResponseWithTools(
         stop_sequence: anthropicResponse.stop_sequence ?? null,
       },
     ],
-    usage: {
-      ...anthropicResponse.usage,
-      prompt_tokens: anthropicResponse.usage?.input_tokens ?? 0,
-      completion_tokens: anthropicResponse.usage?.output_tokens ?? 0,
-      total_tokens:
-        (anthropicResponse.usage?.input_tokens ?? 0) +
-        (anthropicResponse.usage?.output_tokens ?? 0),
-    },
+    usage: convertUsage(anthropicResponse.usage),
   };
 }
 

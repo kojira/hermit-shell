@@ -9,6 +9,18 @@ import {
   getAuthFilePath,
 } from "../utils/auth";
 import { resetClient } from "./chat";
+import {
+  ClaudeSetupTokenFlow,
+  publicSetupTokenStatus,
+  spawnOfficialClaudeSetupToken,
+} from "../utils/setup_token_flow";
+
+const claudeSetupTokenFlow = new ClaudeSetupTokenFlow({
+  spawn: spawnOfficialClaudeSetupToken,
+  verify: verifyAuthToken,
+  apply: applyAuthToken,
+  resetClient,
+});
 
 /**
  * リクエスト元が loopback かどうかを、ソケットの実接続元アドレスだけで判定する。
@@ -51,7 +63,7 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function renderPage(): string {
+export function renderPage(): string {
   const { masked, lastApplied } = currentStatus();
   const maskedSafe = masked ? escapeHtml(masked) : "(未設定)";
   const lastSafe = lastApplied ? escapeHtml(lastApplied) : "(不明)";
@@ -66,12 +78,14 @@ function renderPage(): string {
   h1 { font-size: 1.3rem; }
   .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 16px 0; }
   code { background: #f2f2f2; padding: 2px 6px; border-radius: 4px; }
-  input[type=password] { width: 100%; box-sizing: border-box; padding: 10px; font-family: monospace; font-size: 0.95rem; }
+  input[type=password], input[type=text] { width: 100%; box-sizing: border-box; padding: 10px; font-family: monospace; font-size: 0.95rem; }
   button { margin-top: 12px; padding: 10px 18px; font-size: 1rem; cursor: pointer; }
   .muted { color: #666; font-size: 0.9rem; }
   #result { margin-top: 12px; padding: 10px; border-radius: 6px; display: none; white-space: pre-wrap; }
   #result.ok { display: block; background: #e7f6e7; border: 1px solid #86c586; }
-  #result.err { display: block; background: #fdeaea; border: 1px solid #e0a3a3; }
+  #result.err, #claude-result.err { display: block; background: #fdeaea; border: 1px solid #e0a3a3; }
+  #claude-result { margin-top: 12px; padding: 10px; border-radius: 6px; display: none; white-space: pre-wrap; }
+  #claude-result.ok { display: block; background: #e7f6e7; border: 1px solid #86c586; }
 </style>
 </head>
 <body>
@@ -81,6 +95,20 @@ function renderPage(): string {
   <div class="muted">最終適用: ${lastSafe}</div>
 </div>
 <div class="card">
+  <h2>ブラウザで再認証</h2>
+  <p>Claudeのログイン・同意・2段階認証は、開いたブラウザでご自身が行います。hermit-shellは認証完了後にClaude CLIが発行したセットアップトークンだけを内部で検証・適用し、画面やログには表示しません。</p>
+  <button id="claude-login">Claudeで再認証</button>
+  <button id="claude-cancel" style="display:none">認証を中止してやり直す</button>
+  <div id="claude-code-area" style="display:none; margin-top:16px">
+    <p><a id="claude-auth-link" href="#" target="_blank" rel="noopener" style="display:none">Claude公式認証ページを開く</a></p>
+    <label for="claude-code">Claude認証コード（セットアップトークンではありません）</label>
+    <input id="claude-code" type="password" autocomplete="off" placeholder="Claude公式ページの「コードをコピー」から貼り付け">
+    <button id="claude-code-submit">Claudeへ続行</button>
+  </div>
+  <div id="claude-result"></div>
+</div>
+<div class="card">
+  <h2>トークンを手動入力</h2>
   <label for="token">Claude セットアップトークン（<code>sk-ant-oat01-…</code>）</label>
   <input id="token" type="password" autocomplete="off" placeholder="sk-ant-oat01-...">
   <button id="apply">検証して適用</button>
@@ -88,6 +116,167 @@ function renderPage(): string {
   <p class="muted">入力トークンで Anthropic へ最小の検証呼び出しを行い、成功したときだけ保存・即適用します。失敗時は何も変更しません。</p>
 </div>
 <script>
+  const claudeBtn = document.getElementById('claude-login');
+  const claudeCancelBtn = document.getElementById('claude-cancel');
+  const claudeCodeArea = document.getElementById('claude-code-area');
+  const claudeAuthLink = document.getElementById('claude-auth-link');
+  const claudeCodeInput = document.getElementById('claude-code');
+  const claudeCodeSubmit = document.getElementById('claude-code-submit');
+  const claudeResult = document.getElementById('claude-result');
+  let statusTimer = null;
+  let claudeAuthWindow = null;
+
+  async function pollClaudeStatus() {
+    try {
+      const r = await fetch('/setup/claude/status', { cache: 'no-store' });
+      const data = await r.json();
+      if (data.state === 'waiting_for_user') {
+        claudeBtn.disabled = true;
+        claudeCancelBtn.style.display = 'inline-block';
+        claudeResult.className = '';
+        claudeResult.style.display = 'block';
+        claudeResult.textContent = 'ブラウザでClaudeのログインと認可を完了してください。';
+        if (data.authUrl) {
+          if (claudeAuthWindow) {
+            claudeAuthWindow.location.replace(data.authUrl);
+            claudeAuthWindow = null;
+          }
+          claudeAuthLink.href = data.authUrl;
+          claudeAuthLink.style.display = 'inline-block';
+          claudeCodeSubmit.disabled = false;
+          claudeCodeArea.style.display = 'block';
+        }
+      } else if (data.state === 'waiting_for_cli') {
+        claudeBtn.disabled = true;
+        claudeCancelBtn.style.display = 'inline-block';
+        claudeResult.style.display = 'block';
+        claudeResult.textContent = 'Claude CLIで認証を完了しています...';
+        claudeAuthLink.style.display = 'none';
+        claudeCodeArea.style.display = 'none';
+      } else if (data.state === 'verifying') {
+        claudeBtn.disabled = true;
+        claudeCancelBtn.style.display = 'inline-block';
+        claudeResult.style.display = 'block';
+        claudeResult.textContent = '認証結果を検証中...';
+      } else if (data.state === 'success') {
+        claudeResult.className = 'ok';
+        claudeResult.textContent = 'Claudeの再認証を適用しました。';
+        claudeBtn.disabled = false;
+        claudeCancelBtn.style.display = 'none';
+        claudeCodeSubmit.disabled = false;
+        clearInterval(statusTimer);
+      } else if (data.state === 'error') {
+        if (claudeAuthWindow) claudeAuthWindow.close();
+        claudeAuthWindow = null;
+        claudeResult.className = 'err';
+        claudeResult.textContent = data.message || 'Claudeの再認証に失敗しました。';
+        claudeBtn.disabled = false;
+        claudeCancelBtn.style.display = 'none';
+        claudeCodeSubmit.disabled = false;
+        clearInterval(statusTimer);
+      }
+    } catch (_) {
+      claudeResult.className = 'err';
+      claudeResult.textContent = '状態確認に失敗しました。';
+      claudeBtn.disabled = false;
+      clearInterval(statusTimer);
+    }
+  }
+
+  claudeBtn.addEventListener('click', async () => {
+    claudeAuthWindow = window.open('about:blank', '_blank');
+    claudeBtn.disabled = true;
+    claudeCodeSubmit.disabled = false;
+    claudeAuthLink.href = '#';
+    claudeAuthLink.style.display = 'none';
+    claudeResult.className = '';
+    claudeResult.style.display = 'block';
+    claudeResult.textContent = 'Claude認証を開始しています...';
+    try {
+      const r = await fetch('/setup/claude/start', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) {
+        if (claudeAuthWindow) claudeAuthWindow.close();
+        claudeAuthWindow = null;
+        claudeResult.className = 'err';
+        claudeResult.textContent = data.error || 'Claude認証を開始できませんでした。';
+        claudeBtn.disabled = false;
+        return;
+      }
+      claudeCodeArea.style.display = 'none';
+      claudeCodeInput.value = '';
+      await pollClaudeStatus();
+      statusTimer = setInterval(pollClaudeStatus, 1000);
+    } catch (_) {
+      if (claudeAuthWindow) claudeAuthWindow.close();
+      claudeAuthWindow = null;
+      claudeResult.className = 'err';
+      claudeResult.textContent = '通信エラー';
+      claudeBtn.disabled = false;
+    }
+  });
+
+  claudeCancelBtn.addEventListener('click', async () => {
+    claudeCancelBtn.disabled = true;
+    try {
+      const r = await fetch('/setup/claude/cancel', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'cancel failed');
+      if (claudeAuthWindow) claudeAuthWindow.close();
+      claudeAuthWindow = null;
+      claudeCodeInput.value = '';
+      claudeCodeArea.style.display = 'none';
+      claudeAuthLink.style.display = 'none';
+      claudeResult.style.display = 'none';
+      claudeResult.className = '';
+      claudeBtn.disabled = false;
+      claudeCancelBtn.style.display = 'none';
+      clearInterval(statusTimer);
+    } catch (_) {
+      claudeResult.className = 'err';
+      claudeResult.style.display = 'block';
+      claudeResult.textContent = '認証の中止に失敗しました。';
+    } finally {
+      claudeCancelBtn.disabled = false;
+    }
+  });
+
+  claudeCodeSubmit.addEventListener('click', async () => {
+    const code = claudeCodeInput.value.trim();
+    if (!code) {
+      claudeResult.className = 'err';
+      claudeResult.textContent = 'Claude認証コードを貼り付けてください。';
+      return;
+    }
+    claudeCodeSubmit.disabled = true;
+    try {
+      const r = await fetch('/setup/claude/code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      });
+      claudeCodeInput.value = '';
+      const data = await r.json();
+      if (!r.ok) {
+        claudeResult.className = 'err';
+        claudeResult.textContent = data.error || 'Claude認証コードを送信できませんでした。';
+        claudeCodeSubmit.disabled = false;
+        return;
+      }
+      claudeCodeArea.style.display = 'none';
+      claudeResult.className = '';
+      claudeResult.textContent = 'Claude CLIで認証を完了しています...';
+    } catch (_) {
+      claudeCodeInput.value = '';
+      claudeResult.className = 'err';
+      claudeResult.textContent = '通信エラー';
+      claudeCodeSubmit.disabled = false;
+    }
+  });
+
+  pollClaudeStatus();
+  statusTimer = setInterval(pollClaudeStatus, 1000);
+
   const btn = document.getElementById('apply');
   const result = document.getElementById('result');
   btn.addEventListener('click', async () => {
@@ -127,6 +316,53 @@ function renderPage(): string {
 export function handleSetupPage(req: Request, res: Response): void {
   if (!isLoopback(req)) return denyRemote(res);
   res.status(200).type("html").send(renderPage());
+}
+
+export function handleClaudeSetupTokenStart(req: Request, res: Response): void {
+  if (!isLoopback(req)) return denyRemote(res);
+
+  const started = claudeSetupTokenFlow.start();
+  if (!started.started) {
+    res.status(409).json({ error: "Claude認証はすでに進行中です" });
+    return;
+  }
+  const status = publicSetupTokenStatus(claudeSetupTokenFlow.status());
+  if (status.state === "error") {
+    res.status(503).json(status);
+    return;
+  }
+  res.status(202).json(status);
+}
+
+export function handleClaudeSetupTokenStatus(req: Request, res: Response): void {
+  if (!isLoopback(req)) return denyRemote(res);
+  res
+    .status(200)
+    .set("Cache-Control", "no-store")
+    .json(publicSetupTokenStatus(claudeSetupTokenFlow.status()));
+}
+
+export function handleClaudeSetupTokenCancel(req: Request, res: Response): void {
+  if (!isLoopback(req)) return denyRemote(res);
+  const result = claudeSetupTokenFlow.cancel();
+  res.status(200).json({ state: "idle", ...result });
+}
+
+export function handleClaudeSetupTokenCode(req: Request, res: Response): void {
+  if (!isLoopback(req)) return denyRemote(res);
+
+  const code = (req.body && (req.body as any).code) as unknown;
+  if (typeof code !== "string") {
+    res.status(400).json({ error: "Claude認証コードを入力してください" });
+    return;
+  }
+  const submitted = claudeSetupTokenFlow.submitAuthorizationCode(code);
+  if (!submitted.submitted) {
+    const status = submitted.reason === "invalid_code" ? 400 : submitted.reason === "not_waiting" ? 409 : 503;
+    res.status(status).json({ error: "Claude認証コードを送信できませんでした" });
+    return;
+  }
+  res.status(202).json({ state: "waiting_for_cli" });
 }
 
 export async function handleSetupToken(

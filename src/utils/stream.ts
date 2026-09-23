@@ -1,5 +1,6 @@
 import { Response } from "express";
 import { v4 as uuidv4 } from "uuid";
+import { convertUsage } from "./usage";
 
 export function initSSE(res: Response): void {
   res.setHeader("Content-Type", "text/event-stream");
@@ -58,20 +59,13 @@ export function createUsageChunk(
   created: number,
   usage: any
 ): string {
-  const inputTokens = usage?.input_tokens ?? 0;
-  const outputTokens = usage?.output_tokens ?? 0;
   const chunk = {
     id,
     object: "chat.completion.chunk",
     created,
     model,
     choices: [],
-    usage: {
-      ...usage,
-      prompt_tokens: inputTokens,
-      completion_tokens: outputTokens,
-      total_tokens: inputTokens + outputTokens,
-    },
+    usage: convertUsage(usage),
   };
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
