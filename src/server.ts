@@ -1,7 +1,12 @@
 import express from "express";
 import { handleChatCompletions } from "./handlers/chat";
 import { handleModels } from "./handlers/models";
-import { handleSetupPage, handleSetupToken } from "./handlers/setup";
+import {
+  handleClaudeSetupTokenStart,
+  handleClaudeSetupTokenStatus,
+  handleSetupPage,
+  handleSetupToken,
+} from "./handlers/setup";
 
 const app = express();
 
@@ -17,5 +22,7 @@ app.post("/v1/chat/completions", handleChatCompletions);
 // 認証トークンの設定ページ（localhost 限定・setup.ts 内で 403 判定）
 app.get("/setup", handleSetupPage);
 app.post("/setup/token", handleSetupToken);
+app.post("/setup/claude/start", handleClaudeSetupTokenStart);
+app.get("/setup/claude/status", handleClaudeSetupTokenStatus);
 
 export default app;

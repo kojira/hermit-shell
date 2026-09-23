@@ -1,0 +1,197 @@
+import { spawn as spawnChild } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+export interface SetupTokenStream {
+  on(event: "data", listener: (chunk: Buffer | string) => void): unknown;
+}
+
+export interface SetupTokenChild {
+  stdout: SetupTokenStream;
+  stderr: SetupTokenStream;
+  on(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+  on(event: "error", listener: (error: Error) => void): unknown;
+  kill(signal?: NodeJS.Signals): boolean;
+}
+
+export type SetupTokenState =
+  | { state: "idle" }
+  | { state: "waiting_for_user" }
+  | { state: "verifying" }
+  | { state: "success" }
+  | { state: "error"; message: string };
+
+export type PublicSetupTokenStatus = SetupTokenState;
+
+export function publicSetupTokenStatus(state: SetupTokenState): PublicSetupTokenStatus {
+  return state;
+}
+
+interface SetupTokenFlowDependencies {
+  spawn: () => SetupTokenChild;
+  verify: (token: string) => Promise<{ ok: true } | { ok: false; status?: number }>;
+  apply: (token: string) => void;
+  resetClient: () => void;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}
+
+const TOKEN_PATTERN = /sk-ant-oat01-[A-Za-z0-9_-]{20,1024}/;
+const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
+
+function stripAnsi(value: string): string {
+  return value.replace(ANSI_PATTERN, "");
+}
+
+export class ClaudeSetupTokenFlow {
+  private readonly deps: Required<Pick<SetupTokenFlowDependencies, "timeoutMs" | "maxOutputBytes">> &
+    Omit<SetupTokenFlowDependencies, "timeoutMs" | "maxOutputBytes">;
+  private current: SetupTokenState = { state: "idle" };
+  private child: SetupTokenChild | null = null;
+  private timer: NodeJS.Timeout | null = null;
+  private outputBytes = 0;
+  private scanTail = "";
+  private capturedToken: string | null = null;
+  private finished = false;
+
+  constructor(deps: SetupTokenFlowDependencies) {
+    this.deps = {
+      ...deps,
+      timeoutMs: deps.timeoutMs ?? 10 * 60 * 1_000,
+      maxOutputBytes: deps.maxOutputBytes ?? 256 * 1_024,
+    };
+  }
+
+  status(): SetupTokenState {
+    return this.current;
+  }
+
+  start(): { started: true } | { started: false; reason: "already_running" } {
+    if (this.current.state === "waiting_for_user" || this.current.state === "verifying") {
+      return { started: false, reason: "already_running" };
+    }
+
+    this.resetAttempt();
+    let child: SetupTokenChild;
+    try {
+      child = this.deps.spawn();
+    } catch {
+      this.fail("Claude認証を開始できませんでした");
+      return { started: true };
+    }
+
+    this.child = child;
+    this.current = { state: "waiting_for_user" };
+    child.stdout.on("data", (chunk) => this.acceptOutput(chunk));
+    child.stderr.on("data", (chunk) => this.acceptOutput(chunk));
+    child.on("error", () => this.fail("Claude認証を開始できませんでした"));
+    child.on("close", (code) => void this.handleClose(code));
+    this.timer = setTimeout(
+      () => this.fail("Claude認証が時間切れになりました"),
+      this.deps.timeoutMs
+    );
+    this.timer.unref?.();
+    return { started: true };
+  }
+
+  private resetAttempt(): void {
+    this.clearTimer();
+    this.child = null;
+    this.outputBytes = 0;
+    this.scanTail = "";
+    this.capturedToken = null;
+    this.finished = false;
+  }
+
+  private acceptOutput(chunk: Buffer | string): void {
+    if (this.finished) return;
+    const bytes = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk);
+    this.outputBytes += bytes;
+    if (this.outputBytes > this.deps.maxOutputBytes) {
+      this.fail("Claude認証の出力上限を超えました");
+      return;
+    }
+
+    if (this.capturedToken) return;
+    const text = stripAnsi(this.scanTail + chunk.toString());
+    const match = text.match(TOKEN_PATTERN);
+    if (match) {
+      this.capturedToken = match[0];
+      this.scanTail = "";
+    } else {
+      this.scanTail = text.slice(-2_048);
+    }
+  }
+
+  private async handleClose(code: number | null): Promise<void> {
+    if (this.finished) return;
+    this.clearTimer();
+    if (code !== 0 || !this.capturedToken) {
+      this.fail("Claude認証を完了できませんでした", false);
+      return;
+    }
+
+    this.current = { state: "verifying" };
+    const token = this.capturedToken;
+    this.capturedToken = null;
+    this.scanTail = "";
+    try {
+      const verified = await this.deps.verify(token);
+      if (!verified.ok) {
+        this.fail("Claude認証の検証に失敗しました", false);
+        return;
+      }
+      this.deps.apply(token);
+      this.deps.resetClient();
+      this.finished = true;
+      this.child = null;
+      this.current = { state: "success" };
+    } catch {
+      this.fail("Claude認証を適用できませんでした", false);
+    }
+  }
+
+  private fail(message: string, kill = true): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.clearTimer();
+    const child = this.child;
+    this.child = null;
+    this.capturedToken = null;
+    this.scanTail = "";
+    if (kill && child) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // The process may already have exited. The public result remains generic.
+      }
+    }
+    this.current = { state: "error", message };
+  }
+
+  private clearTimer(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+}
+
+export function spawnOfficialClaudeSetupToken(): SetupTokenChild {
+  const configured = process.env.HERMIT_CLAUDE_BIN;
+  const claudeBin = configured || path.join(os.homedir(), ".local", "bin", "claude");
+  if (!path.isAbsolute(claudeBin)) {
+    throw new Error("HERMIT_CLAUDE_BIN must be absolute");
+  }
+  fs.accessSync(claudeBin, fs.constants.X_OK);
+
+  // macOS `script` allocates the terminal Claude Code expects. The command and every
+  // argument are passed as an argv array: no shell expansion or interpolation occurs.
+  return spawnChild(
+    "/usr/bin/script",
+    ["-q", "/dev/null", claudeBin, "setup-token"],
+    {
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    }
+  );
+}

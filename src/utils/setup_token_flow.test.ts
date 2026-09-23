@@ -1,0 +1,161 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import test from "node:test";
+import { renderPage } from "../handlers/setup";
+import {
+  ClaudeSetupTokenFlow,
+  SetupTokenChild,
+  publicSetupTokenStatus,
+} from "./setup_token_flow";
+
+class FakeStream extends EventEmitter {}
+
+class FakeChild extends EventEmitter implements SetupTokenChild {
+  stdout = new FakeStream();
+  stderr = new FakeStream();
+  killed = false;
+  kill(): boolean {
+    this.killed = true;
+    return true;
+  }
+}
+
+const token = `sk-ant-oat01-${"a".repeat(48)}`;
+
+function makeFlow(overrides: Partial<ConstructorParameters<typeof ClaudeSetupTokenFlow>[0]> = {}) {
+  const child = new FakeChild();
+  const applied: string[] = [];
+  let resets = 0;
+  const flow = new ClaudeSetupTokenFlow({
+    spawn: () => child,
+    verify: async () => ({ ok: true }),
+    apply: (value) => applied.push(value),
+    resetClient: () => {
+      resets += 1;
+    },
+    timeoutMs: 1_000,
+    maxOutputBytes: 4_096,
+    ...overrides,
+  });
+  return { flow, child, applied, resets: () => resets };
+}
+
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+test("captures a split setup token internally, verifies, applies, and never exposes it", async () => {
+  const observedLogs: string[] = [];
+  const originalError = console.error;
+  const originalLog = console.log;
+  console.error = (...args: unknown[]) => observedLogs.push(args.join(" "));
+  console.log = (...args: unknown[]) => observedLogs.push(args.join(" "));
+  try {
+    const { flow, child, applied, resets } = makeFlow();
+    assert.deepEqual(flow.start(), { started: true });
+    child.stdout.emit("data", Buffer.from(`Open browser\n${token.slice(0, 25)}`));
+    child.stdout.emit("data", Buffer.from(`${token.slice(25)}\n`));
+    child.emit("close", 0, null);
+    await settle();
+
+    assert.deepEqual(applied, [token]);
+    assert.equal(resets(), 1);
+    assert.equal(flow.status().state, "success");
+    assert.doesNotMatch(JSON.stringify(publicSetupTokenStatus(flow.status())), /sk-ant-/);
+    assert.doesNotMatch(observedLogs.join("\n"), /sk-ant-/);
+  } finally {
+    console.error = originalError;
+    console.log = originalLog;
+  }
+});
+
+test("allows only one active browser authentication flow", () => {
+  let spawns = 0;
+  const { flow } = makeFlow({
+    spawn: () => {
+      spawns += 1;
+      return new FakeChild();
+    },
+  });
+  assert.deepEqual(flow.start(), { started: true });
+  assert.deepEqual(flow.start(), { started: false, reason: "already_running" });
+  assert.equal(spawns, 1);
+});
+
+test("command failure does not verify, persist, reset, or expose child output", async () => {
+  let verifies = 0;
+  const secretOutput = `${token} internal failure details`;
+  const { flow, child, applied, resets } = makeFlow({
+    verify: async () => {
+      verifies += 1;
+      return { ok: true };
+    },
+  });
+  flow.start();
+  child.stderr.emit("data", Buffer.from(secretOutput));
+  child.emit("close", 1, null);
+  await settle();
+
+  assert.equal(verifies, 0);
+  assert.deepEqual(applied, []);
+  assert.equal(resets(), 0);
+  const status = publicSetupTokenStatus(flow.status());
+  assert.equal(status.state, "error");
+  assert.doesNotMatch(JSON.stringify(status), /sk-ant-|internal failure/);
+});
+
+test("missing token and verification failure never persist state", async () => {
+  const first = makeFlow();
+  first.flow.start();
+  first.child.stdout.emit("data", Buffer.from("Authentication completed"));
+  first.child.emit("close", 0, null);
+  await settle();
+  assert.deepEqual(first.applied, []);
+  assert.equal(first.resets(), 0);
+  assert.equal(first.flow.status().state, "error");
+
+  const second = makeFlow({ verify: async () => ({ ok: false, status: 401 }) });
+  second.flow.start();
+  second.child.stdout.emit("data", Buffer.from(token));
+  second.child.emit("close", 0, null);
+  await settle();
+  assert.deepEqual(second.applied, []);
+  assert.equal(second.resets(), 0);
+  assert.equal(second.flow.status().state, "error");
+  assert.doesNotMatch(JSON.stringify(second.flow.status()), /sk-ant-/);
+});
+
+test("bounded output aborts the child without applying credentials", async () => {
+  const { flow, child, applied } = makeFlow({ maxOutputBytes: 8 });
+  flow.start();
+  child.stdout.emit("data", Buffer.from("too much output"));
+  await settle();
+  assert.equal(child.killed, true);
+  assert.deepEqual(applied, []);
+  assert.equal(flow.status().state, "error");
+});
+
+test("timeout aborts the child without applying credentials", async () => {
+  const { flow, child, applied } = makeFlow({ timeoutMs: 5 });
+  flow.start();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(child.killed, true);
+  assert.deepEqual(applied, []);
+  assert.equal(flow.status().state, "error");
+});
+
+test("setup page keeps manual entry and makes browser login explicitly human-operated", () => {
+  const previous = process.env.ANTHROPIC_AUTH_TOKEN;
+  process.env.ANTHROPIC_AUTH_TOKEN = token;
+  try {
+    const html = renderPage();
+    assert.match(html, /Claudeで再認証/);
+    assert.match(html, /ログイン・同意・2段階認証は、開いたブラウザでご自身が行います/);
+    assert.match(html, /\/setup\/claude\/start/);
+    assert.match(html, /トークンを手動入力/);
+    assert.doesNotMatch(html, new RegExp(token));
+  } finally {
+    if (previous === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+    else process.env.ANTHROPIC_AUTH_TOKEN = previous;
+  }
+});

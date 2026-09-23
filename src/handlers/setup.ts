@@ -9,6 +9,18 @@ import {
   getAuthFilePath,
 } from "../utils/auth";
 import { resetClient } from "./chat";
+import {
+  ClaudeSetupTokenFlow,
+  publicSetupTokenStatus,
+  spawnOfficialClaudeSetupToken,
+} from "../utils/setup_token_flow";
+
+const claudeSetupTokenFlow = new ClaudeSetupTokenFlow({
+  spawn: spawnOfficialClaudeSetupToken,
+  verify: verifyAuthToken,
+  apply: applyAuthToken,
+  resetClient,
+});
 
 /**
  * リクエスト元が loopback かどうかを、ソケットの実接続元アドレスだけで判定する。
@@ -51,7 +63,7 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function renderPage(): string {
+export function renderPage(): string {
   const { masked, lastApplied } = currentStatus();
   const maskedSafe = masked ? escapeHtml(masked) : "(未設定)";
   const lastSafe = lastApplied ? escapeHtml(lastApplied) : "(不明)";
@@ -71,7 +83,9 @@ function renderPage(): string {
   .muted { color: #666; font-size: 0.9rem; }
   #result { margin-top: 12px; padding: 10px; border-radius: 6px; display: none; white-space: pre-wrap; }
   #result.ok { display: block; background: #e7f6e7; border: 1px solid #86c586; }
-  #result.err { display: block; background: #fdeaea; border: 1px solid #e0a3a3; }
+  #result.err, #claude-result.err { display: block; background: #fdeaea; border: 1px solid #e0a3a3; }
+  #claude-result { margin-top: 12px; padding: 10px; border-radius: 6px; display: none; white-space: pre-wrap; }
+  #claude-result.ok { display: block; background: #e7f6e7; border: 1px solid #86c586; }
 </style>
 </head>
 <body>
@@ -81,6 +95,13 @@ function renderPage(): string {
   <div class="muted">最終適用: ${lastSafe}</div>
 </div>
 <div class="card">
+  <h2>ブラウザで再認証</h2>
+  <p>Claudeのログイン・同意・2段階認証は、開いたブラウザでご自身が行います。hermit-shellは認証完了後にClaude CLIが発行したセットアップトークンだけを内部で検証・適用し、画面やログには表示しません。</p>
+  <button id="claude-login">Claudeで再認証</button>
+  <div id="claude-result"></div>
+</div>
+<div class="card">
+  <h2>トークンを手動入力</h2>
   <label for="token">Claude セットアップトークン（<code>sk-ant-oat01-…</code>）</label>
   <input id="token" type="password" autocomplete="off" placeholder="sk-ant-oat01-...">
   <button id="apply">検証して適用</button>
@@ -88,6 +109,62 @@ function renderPage(): string {
   <p class="muted">入力トークンで Anthropic へ最小の検証呼び出しを行い、成功したときだけ保存・即適用します。失敗時は何も変更しません。</p>
 </div>
 <script>
+  const claudeBtn = document.getElementById('claude-login');
+  const claudeResult = document.getElementById('claude-result');
+  let statusTimer = null;
+
+  async function pollClaudeStatus() {
+    try {
+      const r = await fetch('/setup/claude/status', { cache: 'no-store' });
+      const data = await r.json();
+      if (data.state === 'waiting_for_user') {
+        claudeResult.className = '';
+        claudeResult.style.display = 'block';
+        claudeResult.textContent = 'ブラウザでClaudeのログインと認可を完了してください。';
+      } else if (data.state === 'verifying') {
+        claudeResult.textContent = '認証結果を検証中...';
+      } else if (data.state === 'success') {
+        claudeResult.className = 'ok';
+        claudeResult.textContent = 'Claudeの再認証を適用しました。';
+        claudeBtn.disabled = false;
+        clearInterval(statusTimer);
+      } else if (data.state === 'error') {
+        claudeResult.className = 'err';
+        claudeResult.textContent = data.message || 'Claudeの再認証に失敗しました。';
+        claudeBtn.disabled = false;
+        clearInterval(statusTimer);
+      }
+    } catch (_) {
+      claudeResult.className = 'err';
+      claudeResult.textContent = '状態確認に失敗しました。';
+      claudeBtn.disabled = false;
+      clearInterval(statusTimer);
+    }
+  }
+
+  claudeBtn.addEventListener('click', async () => {
+    claudeBtn.disabled = true;
+    claudeResult.className = '';
+    claudeResult.style.display = 'block';
+    claudeResult.textContent = 'Claude認証を開始しています...';
+    try {
+      const r = await fetch('/setup/claude/start', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) {
+        claudeResult.className = 'err';
+        claudeResult.textContent = data.error || 'Claude認証を開始できませんでした。';
+        claudeBtn.disabled = false;
+        return;
+      }
+      await pollClaudeStatus();
+      statusTimer = setInterval(pollClaudeStatus, 1000);
+    } catch (_) {
+      claudeResult.className = 'err';
+      claudeResult.textContent = '通信エラー';
+      claudeBtn.disabled = false;
+    }
+  });
+
   const btn = document.getElementById('apply');
   const result = document.getElementById('result');
   btn.addEventListener('click', async () => {
@@ -127,6 +204,30 @@ function renderPage(): string {
 export function handleSetupPage(req: Request, res: Response): void {
   if (!isLoopback(req)) return denyRemote(res);
   res.status(200).type("html").send(renderPage());
+}
+
+export function handleClaudeSetupTokenStart(req: Request, res: Response): void {
+  if (!isLoopback(req)) return denyRemote(res);
+
+  const started = claudeSetupTokenFlow.start();
+  if (!started.started) {
+    res.status(409).json({ error: "Claude認証はすでに進行中です" });
+    return;
+  }
+  const status = publicSetupTokenStatus(claudeSetupTokenFlow.status());
+  if (status.state === "error") {
+    res.status(503).json(status);
+    return;
+  }
+  res.status(202).json(status);
+}
+
+export function handleClaudeSetupTokenStatus(req: Request, res: Response): void {
+  if (!isLoopback(req)) return denyRemote(res);
+  res
+    .status(200)
+    .set("Cache-Control", "no-store")
+    .json(publicSetupTokenStatus(claudeSetupTokenFlow.status()));
 }
 
 export async function handleSetupToken(
