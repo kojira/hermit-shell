@@ -197,6 +197,19 @@ test("continues past a successful CLI press-Enter prompt", () => {
   assert.deepEqual(child.stdin.writes, ["valid-code#valid-state\n", "\n"]);
 });
 
+test("continues an unclassified prompt-sized CLI screen after code exchange", () => {
+  const { flow, child } = makeFlow();
+  flow.start();
+  child.stdout.emit(
+    "data",
+    Buffer.from("https://claude.com/cai/oauth/authorize?code=true\n")
+  );
+  flow.submitAuthorizationCode("valid-code#valid-state");
+  child.stdout.emit("data", Buffer.from("HERMIT_AUTH_CODE_FORWARDED\n"));
+  child.stdout.emit("data", Buffer.from("x".repeat(116)));
+  assert.deepEqual(child.stdin.writes, ["valid-code#valid-state\n", "\n"]);
+});
+
 test("returns from waiting_for_cli to a fresh official authorization URL", () => {
   const { flow, child } = makeFlow();
   flow.start();

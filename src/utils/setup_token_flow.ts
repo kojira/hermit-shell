@@ -252,17 +252,25 @@ export class ClaudeSetupTokenFlow {
     }
 
     const lower = clean.toLowerCase();
+    const explicitSuccessPrompt =
+      lower.includes("press enter") && !/(error|failed|retry)/.test(lower);
+    const unclassifiedPromptSizedScreen =
+      this.codeForwarded &&
+      bytes >= 64 &&
+      !/(error|failed|retry)/.test(lower) &&
+      !lower.includes("/oauth/authorize") &&
+      !TOKEN_PATTERN.test(clean);
     if (
       this.current.state === "waiting_for_cli" &&
       !this.continuedAfterSuccessPrompt &&
-      lower.includes("press enter") &&
-      !/(error|failed|retry)/.test(lower)
+      (explicitSuccessPrompt || unclassifiedPromptSizedScreen)
     ) {
       this.continuedAfterSuccessPrompt = true;
-      this.trace("successful_prompt_continue_started");
+      const reason = explicitSuccessPrompt ? "explicit_success_prompt" : "unclassified_prompt_screen";
+      this.trace("successful_prompt_continue_started", { reason, bytes });
       try {
         this.child?.stdin.write("\n");
-        this.trace("successful_prompt_enter_sent");
+        this.trace("successful_prompt_enter_sent", { reason });
       } catch {
         this.fail("Claude認証を完了できませんでした", true, "continue_write_failed");
         return;
