@@ -7,7 +7,12 @@ export interface SetupTokenStream {
   on(event: "data", listener: (chunk: Buffer | string) => void): unknown;
 }
 
+export interface SetupTokenInput {
+  write(value: string | Buffer): boolean;
+}
+
 export interface SetupTokenChild {
+  stdin: SetupTokenInput;
   stdout: SetupTokenStream;
   stderr: SetupTokenStream;
   on(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
@@ -18,6 +23,7 @@ export interface SetupTokenChild {
 export type SetupTokenState =
   | { state: "idle" }
   | { state: "waiting_for_user"; authUrl?: string }
+  | { state: "waiting_for_cli" }
   | { state: "verifying" }
   | { state: "success" }
   | { state: "error"; message: string };
@@ -86,8 +92,32 @@ export class ClaudeSetupTokenFlow {
     return this.current;
   }
 
+  submitAuthorizationCode(code: string):
+    | { submitted: true }
+    | { submitted: false; reason: "not_waiting" | "invalid_code" | "write_failed" } {
+    if (this.current.state !== "waiting_for_user" || !this.child) {
+      return { submitted: false, reason: "not_waiting" };
+    }
+    const trimmed = code.trim();
+    if (!trimmed || Buffer.byteLength(trimmed) > 4_096) {
+      return { submitted: false, reason: "invalid_code" };
+    }
+    try {
+      this.child.stdin.write(`${trimmed}\n`);
+      this.current = { state: "waiting_for_cli" };
+      return { submitted: true };
+    } catch {
+      this.fail("Claude認証コードを送信できませんでした");
+      return { submitted: false, reason: "write_failed" };
+    }
+  }
+
   start(): { started: true } | { started: false; reason: "already_running" } {
-    if (this.current.state === "waiting_for_user" || this.current.state === "verifying") {
+    if (
+      this.current.state === "waiting_for_user" ||
+      this.current.state === "waiting_for_cli" ||
+      this.current.state === "verifying"
+    ) {
       return { started: false, reason: "already_running" };
     }
 
@@ -222,6 +252,17 @@ export function claudeSetupEnvironment(
   return env;
 }
 
+const EXPECT_SETUP_TOKEN_SCRIPT = `
+set timeout -1
+spawn -noecho -- $env(HERMIT_CLAUDE_EXECUTABLE) setup-token
+interact
+set wait_result [wait]
+if {[lindex $wait_result 2] == 0} {
+  exit [lindex $wait_result 3]
+}
+exit 1
+`;
+
 export function spawnOfficialClaudeSetupToken(): SetupTokenChild {
   const configured = process.env.HERMIT_CLAUDE_BIN;
   const claudeBin = configured || path.join(os.homedir(), ".local", "bin", "claude");
@@ -230,14 +271,18 @@ export function spawnOfficialClaudeSetupToken(): SetupTokenChild {
   }
   fs.accessSync(claudeBin, fs.constants.X_OK);
 
-  // macOS `script` allocates the terminal Claude Code expects. The command and every
-  // argument are passed as an argv array: no shell expansion or interpolation occurs.
+  // `expect` owns Claude Code's PTY while its stdin remains available for the
+  // browser-returned authorization code. The executable path is an environment
+  // value consumed directly by Tcl; no shell parses it.
   return spawnChild(
-    "/usr/bin/script",
-    ["-q", "/dev/null", claudeBin, "setup-token"],
+    "/usr/bin/expect",
+    ["-c", EXPECT_SETUP_TOKEN_SCRIPT],
     {
-      env: claudeSetupEnvironment(),
-      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...claudeSetupEnvironment(),
+        HERMIT_CLAUDE_EXECUTABLE: claudeBin,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
     }
   );
 }

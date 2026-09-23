@@ -11,7 +11,16 @@ import {
 
 class FakeStream extends EventEmitter {}
 
+class FakeInput {
+  writes: string[] = [];
+  write(value: string | Buffer): boolean {
+    this.writes.push(value.toString());
+    return true;
+  }
+}
+
 class FakeChild extends EventEmitter implements SetupTokenChild {
+  stdin = new FakeInput();
   stdout = new FakeStream();
   stderr = new FakeStream();
   killed = false;
@@ -86,6 +95,30 @@ test("publishes only the official Claude authentication URL while waiting", () =
   assert.deepEqual(flow.status(), {
     state: "waiting_for_user",
     authUrl: "https://claude.com/cai/oauth/authorize?code=true",
+  });
+});
+
+test("submits the browser authorization code only to the active CLI stdin", () => {
+  const { flow, child } = makeFlow();
+  assert.deepEqual(flow.submitAuthorizationCode("before-start"), {
+    submitted: false,
+    reason: "not_waiting",
+  });
+
+  flow.start();
+  child.stdout.emit(
+    "data",
+    Buffer.from("https://claude.com/cai/oauth/authorize?code=true\n")
+  );
+  assert.deepEqual(flow.submitAuthorizationCode(" browser-code#oauth-secret "), {
+    submitted: true,
+  });
+  assert.deepEqual(child.stdin.writes, ["browser-code#oauth-secret\n"]);
+  assert.deepEqual(flow.status(), { state: "waiting_for_cli" });
+  assert.doesNotMatch(JSON.stringify(flow.status()), /browser-code|oauth-secret/);
+  assert.deepEqual(flow.submitAuthorizationCode("second-code"), {
+    submitted: false,
+    reason: "not_waiting",
   });
 });
 
@@ -188,6 +221,9 @@ test("setup page keeps manual entry and makes browser login explicitly human-ope
     assert.match(html, /\/setup\/claude\/start/);
     assert.match(html, /window\.open\('about:blank'/);
     assert.match(html, /data\.authUrl/);
+    assert.match(html, /認証コード/);
+    assert.match(html, /\/setup\/claude\/code/);
+    assert.match(html, /Claudeへ続行/);
     assert.match(html, /トークンを手動入力/);
     assert.doesNotMatch(html, new RegExp(token));
   } finally {

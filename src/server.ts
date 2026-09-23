@@ -2,6 +2,7 @@ import express from "express";
 import { handleChatCompletions } from "./handlers/chat";
 import { handleModels } from "./handlers/models";
 import {
+  handleClaudeSetupTokenCode,
   handleClaudeSetupTokenStart,
   handleClaudeSetupTokenStatus,
   handleSetupPage,
@@ -23,6 +24,7 @@ app.post("/v1/chat/completions", handleChatCompletions);
 app.get("/setup", handleSetupPage);
 app.post("/setup/token", handleSetupToken);
 app.post("/setup/claude/start", handleClaudeSetupTokenStart);
+app.post("/setup/claude/code", handleClaudeSetupTokenCode);
 app.get("/setup/claude/status", handleClaudeSetupTokenStatus);
 
 export default app;

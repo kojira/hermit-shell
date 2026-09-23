@@ -78,7 +78,7 @@ export function renderPage(): string {
   h1 { font-size: 1.3rem; }
   .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 16px 0; }
   code { background: #f2f2f2; padding: 2px 6px; border-radius: 4px; }
-  input[type=password] { width: 100%; box-sizing: border-box; padding: 10px; font-family: monospace; font-size: 0.95rem; }
+  input[type=password], input[type=text] { width: 100%; box-sizing: border-box; padding: 10px; font-family: monospace; font-size: 0.95rem; }
   button { margin-top: 12px; padding: 10px 18px; font-size: 1rem; cursor: pointer; }
   .muted { color: #666; font-size: 0.9rem; }
   #result { margin-top: 12px; padding: 10px; border-radius: 6px; display: none; white-space: pre-wrap; }
@@ -98,6 +98,11 @@ export function renderPage(): string {
   <h2>ブラウザで再認証</h2>
   <p>Claudeのログイン・同意・2段階認証は、開いたブラウザでご自身が行います。hermit-shellは認証完了後にClaude CLIが発行したセットアップトークンだけを内部で検証・適用し、画面やログには表示しません。</p>
   <button id="claude-login">Claudeで再認証</button>
+  <div id="claude-code-area" style="display:none; margin-top:16px">
+    <label for="claude-code">Claude認証コード（セットアップトークンではありません）</label>
+    <input id="claude-code" type="password" autocomplete="off" placeholder="Claude公式ページの「コードをコピー」から貼り付け">
+    <button id="claude-code-submit">Claudeへ続行</button>
+  </div>
   <div id="claude-result"></div>
 </div>
 <div class="card">
@@ -110,6 +115,9 @@ export function renderPage(): string {
 </div>
 <script>
   const claudeBtn = document.getElementById('claude-login');
+  const claudeCodeArea = document.getElementById('claude-code-area');
+  const claudeCodeInput = document.getElementById('claude-code');
+  const claudeCodeSubmit = document.getElementById('claude-code-submit');
   const claudeResult = document.getElementById('claude-result');
   let statusTimer = null;
   let claudeAuthWindow = null;
@@ -122,16 +130,23 @@ export function renderPage(): string {
         claudeResult.className = '';
         claudeResult.style.display = 'block';
         claudeResult.textContent = 'ブラウザでClaudeのログインと認可を完了してください。';
-        if (data.authUrl && claudeAuthWindow) {
-          claudeAuthWindow.location.replace(data.authUrl);
-          claudeAuthWindow = null;
+        if (data.authUrl) {
+          if (claudeAuthWindow) {
+            claudeAuthWindow.location.replace(data.authUrl);
+            claudeAuthWindow = null;
+          }
+          claudeCodeArea.style.display = 'block';
         }
+      } else if (data.state === 'waiting_for_cli') {
+        claudeResult.textContent = 'Claude CLIで認証を完了しています...';
+        claudeCodeArea.style.display = 'none';
       } else if (data.state === 'verifying') {
         claudeResult.textContent = '認証結果を検証中...';
       } else if (data.state === 'success') {
         claudeResult.className = 'ok';
         claudeResult.textContent = 'Claudeの再認証を適用しました。';
         claudeBtn.disabled = false;
+        claudeCodeSubmit.disabled = false;
         clearInterval(statusTimer);
       } else if (data.state === 'error') {
         if (claudeAuthWindow) claudeAuthWindow.close();
@@ -139,6 +154,7 @@ export function renderPage(): string {
         claudeResult.className = 'err';
         claudeResult.textContent = data.message || 'Claudeの再認証に失敗しました。';
         claudeBtn.disabled = false;
+        claudeCodeSubmit.disabled = false;
         clearInterval(statusTimer);
       }
     } catch (_) {
@@ -152,6 +168,7 @@ export function renderPage(): string {
   claudeBtn.addEventListener('click', async () => {
     claudeAuthWindow = window.open('about:blank', '_blank');
     claudeBtn.disabled = true;
+    claudeCodeSubmit.disabled = false;
     claudeResult.className = '';
     claudeResult.style.display = 'block';
     claudeResult.textContent = 'Claude認証を開始しています...';
@@ -166,6 +183,8 @@ export function renderPage(): string {
         claudeBtn.disabled = false;
         return;
       }
+      claudeCodeArea.style.display = 'none';
+      claudeCodeInput.value = '';
       await pollClaudeStatus();
       statusTimer = setInterval(pollClaudeStatus, 1000);
     } catch (_) {
@@ -174,6 +193,39 @@ export function renderPage(): string {
       claudeResult.className = 'err';
       claudeResult.textContent = '通信エラー';
       claudeBtn.disabled = false;
+    }
+  });
+
+  claudeCodeSubmit.addEventListener('click', async () => {
+    const code = claudeCodeInput.value.trim();
+    if (!code) {
+      claudeResult.className = 'err';
+      claudeResult.textContent = 'Claude認証コードを貼り付けてください。';
+      return;
+    }
+    claudeCodeSubmit.disabled = true;
+    try {
+      const r = await fetch('/setup/claude/code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      });
+      claudeCodeInput.value = '';
+      const data = await r.json();
+      if (!r.ok) {
+        claudeResult.className = 'err';
+        claudeResult.textContent = data.error || 'Claude認証コードを送信できませんでした。';
+        claudeCodeSubmit.disabled = false;
+        return;
+      }
+      claudeCodeArea.style.display = 'none';
+      claudeResult.className = '';
+      claudeResult.textContent = 'Claude CLIで認証を完了しています...';
+    } catch (_) {
+      claudeCodeInput.value = '';
+      claudeResult.className = 'err';
+      claudeResult.textContent = '通信エラー';
+      claudeCodeSubmit.disabled = false;
     }
   });
 
@@ -240,6 +292,23 @@ export function handleClaudeSetupTokenStatus(req: Request, res: Response): void 
     .status(200)
     .set("Cache-Control", "no-store")
     .json(publicSetupTokenStatus(claudeSetupTokenFlow.status()));
+}
+
+export function handleClaudeSetupTokenCode(req: Request, res: Response): void {
+  if (!isLoopback(req)) return denyRemote(res);
+
+  const code = (req.body && (req.body as any).code) as unknown;
+  if (typeof code !== "string") {
+    res.status(400).json({ error: "Claude認証コードを入力してください" });
+    return;
+  }
+  const submitted = claudeSetupTokenFlow.submitAuthorizationCode(code);
+  if (!submitted.submitted) {
+    const status = submitted.reason === "invalid_code" ? 400 : submitted.reason === "not_waiting" ? 409 : 503;
+    res.status(status).json({ error: "Claude認証コードを送信できませんでした" });
+    return;
+  }
+  res.status(202).json({ state: "waiting_for_cli" });
 }
 
 export async function handleSetupToken(
