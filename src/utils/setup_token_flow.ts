@@ -111,6 +111,7 @@ export class ClaudeSetupTokenFlow {
       this.child.stdin.write(`${trimmed}\n`);
       this.scanTail = "";
       this.current = { state: "waiting_for_cli" };
+      this.trace("code_submitted");
       return { submitted: true };
     } catch {
       this.fail("Claude認証コードを送信できませんでした");
@@ -138,6 +139,7 @@ export class ClaudeSetupTokenFlow {
 
     this.child = child;
     this.current = { state: "waiting_for_user" };
+    this.trace("flow_started");
     child.stdout.on("data", (chunk) => this.acceptOutput(chunk));
     child.stderr.on("data", (chunk) => this.acceptOutput(chunk));
     child.on("error", () => this.fail("Claude認証を開始できませんでした"));
@@ -175,14 +177,20 @@ export class ClaudeSetupTokenFlow {
       authUrl &&
       (this.current.state === "waiting_for_user" || this.current.state === "waiting_for_cli")
     ) {
+      const retry = this.current.state === "waiting_for_cli";
       this.current = { state: "waiting_for_user", authUrl };
+      this.trace("auth_url_ready", { retry });
     }
 
     const clean = stripAnsi(raw);
+    if (clean.includes("HERMIT_AUTH_CODE_FORWARDED")) {
+      this.trace("code_forwarded");
+    }
     if (
       this.current.state === "waiting_for_cli" &&
       AUTH_CODE_FAILURE_PHRASES.some((phrase) => clean.includes(phrase))
     ) {
+      this.trace("authorization_code_rejected");
       this.fail("Claude認証コードが無効または期限切れです。もう一度認証してください。");
       return;
     }
@@ -191,6 +199,7 @@ export class ClaudeSetupTokenFlow {
     if (match) {
       this.capturedToken = match[0];
       this.scanTail = "";
+      this.trace("final_token_detected");
     } else {
       this.scanTail = raw.slice(-2_048);
     }
@@ -198,6 +207,7 @@ export class ClaudeSetupTokenFlow {
 
   private async handleClose(code: number | null): Promise<void> {
     if (this.finished) return;
+    this.trace("cli_closed", { code });
     this.clearTimer();
     if (code !== 0 || !this.capturedToken) {
       this.fail("Claude認証を完了できませんでした", false);
@@ -205,17 +215,21 @@ export class ClaudeSetupTokenFlow {
     }
 
     this.current = { state: "verifying" };
+    this.trace("verification_started");
     const token = this.capturedToken;
     this.capturedToken = null;
     this.scanTail = "";
     try {
       const verified = await this.deps.verify(token);
       if (!verified.ok) {
+        this.trace("verification_failed", { status: verified.status ?? null });
         this.fail("Claude認証の検証に失敗しました", false);
         return;
       }
+      this.trace("verification_succeeded");
       this.deps.apply(token);
       this.deps.resetClient();
+      this.trace("token_applied");
       this.finished = true;
       this.child = null;
       this.current = { state: "success" };
@@ -245,6 +259,10 @@ export class ClaudeSetupTokenFlow {
   private clearTimer(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+  }
+
+  private trace(event: string, details: Record<string, unknown> = {}): void {
+    console.info("[hermit-claude-setup]", JSON.stringify({ event, ...details }));
   }
 }
 
@@ -280,6 +298,7 @@ proc forward_stdin {} {
   }
   if {[gets stdin line] >= 0} {
     send -- "$line\\r"
+    puts "HERMIT_AUTH_CODE_FORWARDED"
   }
 }
 fileevent stdin readable forward_stdin

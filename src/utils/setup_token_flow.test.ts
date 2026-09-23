@@ -54,6 +54,43 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+test("emits redacted lifecycle evidence without code, token, or OAuth query", async () => {
+  const logs: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    const { flow, child } = makeFlow();
+    flow.start();
+    child.stdout.emit(
+      "data",
+      Buffer.from("https://claude.com/cai/oauth/authorize?secret=query\n")
+    );
+    flow.submitAuthorizationCode("browser-code#oauth-secret");
+    child.stdout.emit("data", Buffer.from("HERMIT_AUTH_CODE_FORWARDED\n"));
+    child.stdout.emit("data", Buffer.from(`${token}\n`));
+    child.emit("close", 0, null);
+    await settle();
+
+    const joined = logs.join("\n");
+    for (const event of [
+      "flow_started",
+      "auth_url_ready",
+      "code_submitted",
+      "code_forwarded",
+      "final_token_detected",
+      "cli_closed",
+      "verification_started",
+      "verification_succeeded",
+      "token_applied",
+    ]) {
+      assert.match(joined, new RegExp(event));
+    }
+    assert.doesNotMatch(joined, /browser-code|oauth-secret|sk-ant-|secret=query/);
+  } finally {
+    console.info = originalInfo;
+  }
+});
+
 test("captures a split setup token internally, verifies, applies, and never exposes it", async () => {
   const observedLogs: string[] = [];
   const originalError = console.error;
