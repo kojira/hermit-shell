@@ -105,6 +105,31 @@ export class ClaudeSetupTokenFlow {
     return this.current;
   }
 
+  cancel(): { cancelled: boolean } {
+    const active =
+      this.current.state === "waiting_for_user" ||
+      this.current.state === "waiting_for_cli" ||
+      this.current.state === "verifying";
+    if (!active) return { cancelled: false };
+
+    this.finished = true;
+    this.clearTimer();
+    const child = this.child;
+    this.child = null;
+    this.capturedToken = null;
+    this.scanTail = "";
+    if (child) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // Cancellation still returns the UI to idle if the CLI already exited.
+      }
+    }
+    this.current = { state: "idle" };
+    this.trace("flow_cancelled", { childTerminated: Boolean(child) });
+    return { cancelled: true };
+  }
+
   submitAuthorizationCode(code: string):
     | { submitted: true }
     | { submitted: false; reason: "not_waiting" | "invalid_code" | "write_failed" } {

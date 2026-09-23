@@ -274,6 +274,21 @@ test("forces the CLI to emit its fallback URL in a usable PTY", () => {
   assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
 });
 
+test("lets the user cancel an active flow and start again", () => {
+  let activeChild = new FakeChild();
+  const { flow } = makeFlow({
+    spawn: () => activeChild,
+  });
+  assert.deepEqual(flow.start(), { started: true });
+  assert.deepEqual(flow.cancel(), { cancelled: true });
+  assert.equal(activeChild.killed, true);
+  assert.deepEqual(flow.status(), { state: "idle" });
+
+  activeChild = new FakeChild();
+  assert.deepEqual(flow.start(), { started: true });
+  assert.equal(activeChild.killed, false);
+});
+
 test("allows only one active browser authentication flow", () => {
   let spawns = 0;
   const { flow } = makeFlow({
@@ -357,6 +372,8 @@ test("setup page keeps manual entry and makes browser login explicitly human-ope
     assert.match(html, /Claudeで再認証/);
     assert.match(html, /ログイン・同意・2段階認証は、開いたブラウザでご自身が行います/);
     assert.match(html, /\/setup\/claude\/start/);
+    assert.match(html, /\/setup\/claude\/cancel/);
+    assert.match(html, /認証を中止してやり直す/);
     assert.match(html, /window\.open\('about:blank'/);
     assert.match(html, /data\.authUrl/);
     assert.match(html, /id="claude-auth-link"/);

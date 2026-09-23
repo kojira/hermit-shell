@@ -98,6 +98,7 @@ export function renderPage(): string {
   <h2>ブラウザで再認証</h2>
   <p>Claudeのログイン・同意・2段階認証は、開いたブラウザでご自身が行います。hermit-shellは認証完了後にClaude CLIが発行したセットアップトークンだけを内部で検証・適用し、画面やログには表示しません。</p>
   <button id="claude-login">Claudeで再認証</button>
+  <button id="claude-cancel" style="display:none">認証を中止してやり直す</button>
   <div id="claude-code-area" style="display:none; margin-top:16px">
     <p><a id="claude-auth-link" href="#" target="_blank" rel="noopener" style="display:none">Claude公式認証ページを開く</a></p>
     <label for="claude-code">Claude認証コード（セットアップトークンではありません）</label>
@@ -116,6 +117,7 @@ export function renderPage(): string {
 </div>
 <script>
   const claudeBtn = document.getElementById('claude-login');
+  const claudeCancelBtn = document.getElementById('claude-cancel');
   const claudeCodeArea = document.getElementById('claude-code-area');
   const claudeAuthLink = document.getElementById('claude-auth-link');
   const claudeCodeInput = document.getElementById('claude-code');
@@ -129,6 +131,8 @@ export function renderPage(): string {
       const r = await fetch('/setup/claude/status', { cache: 'no-store' });
       const data = await r.json();
       if (data.state === 'waiting_for_user') {
+        claudeBtn.disabled = true;
+        claudeCancelBtn.style.display = 'inline-block';
         claudeResult.className = '';
         claudeResult.style.display = 'block';
         claudeResult.textContent = 'ブラウザでClaudeのログインと認可を完了してください。';
@@ -143,15 +147,22 @@ export function renderPage(): string {
           claudeCodeArea.style.display = 'block';
         }
       } else if (data.state === 'waiting_for_cli') {
+        claudeBtn.disabled = true;
+        claudeCancelBtn.style.display = 'inline-block';
+        claudeResult.style.display = 'block';
         claudeResult.textContent = 'Claude CLIで認証を完了しています...';
         claudeAuthLink.style.display = 'none';
         claudeCodeArea.style.display = 'none';
       } else if (data.state === 'verifying') {
+        claudeBtn.disabled = true;
+        claudeCancelBtn.style.display = 'inline-block';
+        claudeResult.style.display = 'block';
         claudeResult.textContent = '認証結果を検証中...';
       } else if (data.state === 'success') {
         claudeResult.className = 'ok';
         claudeResult.textContent = 'Claudeの再認証を適用しました。';
         claudeBtn.disabled = false;
+        claudeCancelBtn.style.display = 'none';
         claudeCodeSubmit.disabled = false;
         clearInterval(statusTimer);
       } else if (data.state === 'error') {
@@ -160,6 +171,7 @@ export function renderPage(): string {
         claudeResult.className = 'err';
         claudeResult.textContent = data.message || 'Claudeの再認証に失敗しました。';
         claudeBtn.disabled = false;
+        claudeCancelBtn.style.display = 'none';
         claudeCodeSubmit.disabled = false;
         clearInterval(statusTimer);
       }
@@ -204,6 +216,31 @@ export function renderPage(): string {
     }
   });
 
+  claudeCancelBtn.addEventListener('click', async () => {
+    claudeCancelBtn.disabled = true;
+    try {
+      const r = await fetch('/setup/claude/cancel', { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'cancel failed');
+      if (claudeAuthWindow) claudeAuthWindow.close();
+      claudeAuthWindow = null;
+      claudeCodeInput.value = '';
+      claudeCodeArea.style.display = 'none';
+      claudeAuthLink.style.display = 'none';
+      claudeResult.style.display = 'none';
+      claudeResult.className = '';
+      claudeBtn.disabled = false;
+      claudeCancelBtn.style.display = 'none';
+      clearInterval(statusTimer);
+    } catch (_) {
+      claudeResult.className = 'err';
+      claudeResult.style.display = 'block';
+      claudeResult.textContent = '認証の中止に失敗しました。';
+    } finally {
+      claudeCancelBtn.disabled = false;
+    }
+  });
+
   claudeCodeSubmit.addEventListener('click', async () => {
     const code = claudeCodeInput.value.trim();
     if (!code) {
@@ -236,6 +273,9 @@ export function renderPage(): string {
       claudeCodeSubmit.disabled = false;
     }
   });
+
+  pollClaudeStatus();
+  statusTimer = setInterval(pollClaudeStatus, 1000);
 
   const btn = document.getElementById('apply');
   const result = document.getElementById('result');
@@ -300,6 +340,12 @@ export function handleClaudeSetupTokenStatus(req: Request, res: Response): void 
     .status(200)
     .set("Cache-Control", "no-store")
     .json(publicSetupTokenStatus(claudeSetupTokenFlow.status()));
+}
+
+export function handleClaudeSetupTokenCancel(req: Request, res: Response): void {
+  if (!isLoopback(req)) return denyRemote(res);
+  const result = claudeSetupTokenFlow.cancel();
+  res.status(200).json({ state: "idle", ...result });
 }
 
 export function handleClaudeSetupTokenCode(req: Request, res: Response): void {
