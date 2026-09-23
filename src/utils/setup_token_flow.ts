@@ -51,8 +51,8 @@ function officialClaudeAuthUrl(value: string): string | null {
       const url = new URL(candidate);
       if (
         url.protocol === "https:" &&
-        url.hostname === "claude.ai" &&
-        url.pathname === "/oauth/authorize"
+        url.hostname === "claude.com" &&
+        url.pathname === "/cai/oauth/authorize"
       ) {
         return url.toString();
       }

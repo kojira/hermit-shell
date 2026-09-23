@@ -78,13 +78,13 @@ test("publishes only the official Claude authentication URL while waiting", () =
   child.stdout.emit(
     "data",
     Buffer.from(
-      "Browser didn't open? \u001b]8;;https://claude.ai/oauth/authorize?code=true\u0007Sign in\u001b]8;;\u0007\n"
+      "Browser didn't open? \u001b]8;;https://claude.com/cai/oauth/authorize?code=true\u0007Sign in\u001b]8;;\u0007\n"
     )
   );
 
   assert.deepEqual(flow.status(), {
     state: "waiting_for_user",
-    authUrl: "https://claude.ai/oauth/authorize?code=true",
+    authUrl: "https://claude.com/cai/oauth/authorize?code=true",
   });
 });
 
