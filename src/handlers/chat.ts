@@ -15,7 +15,9 @@ import {
   createUsageChunk,
   sendDone,
   createStreamContext,
+  StreamContext,
 } from "../utils/stream";
+import { accumulateMessage } from "../utils/message_accumulator";
 import {
   openaiToolsToAnthropic,
   openaiMessagesToAnthropic,
@@ -303,39 +305,88 @@ export async function handleChatCompletions(
   }
 }
 
+/**
+ * Anthropic へストリーミングで要求し、生イベントから最終メッセージを組み立てる。
+ * SDK の MessageStream は tool 引数を受信中に逐次 parse し、生の制御文字で例外を
+ * 出して応答全体を失うため使わない（accumulateMessage はブロック完了時に一度だけ解釈）。
+ * 非ストリーミング応答も同じ経路で集約する（SDK 0.80 の10分ガード回避も兼ねる）。
+ */
+async function streamMessage(
+  params: Record<string, unknown>,
+  signal?: AbortSignal,
+  onText?: (text: string) => void
+): Promise<any> {
+  const { stream: _stream, ...rest } = params;
+  const events = await getClient().messages.create(
+    { ...(rest as any), stream: true },
+    signal ? { signal } : undefined
+  );
+  return accumulateMessage(events as any, onText);
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "APIUserAbortError" || error.name === "AbortError")
+  );
+}
+
 async function handleNonStreaming(
   res: Response,
   anthropicReq: any,
   requestedModel: string
 ): Promise<void> {
-  const { stream: _stream, ...params } = anthropicReq;
-  // クライアントには非ストリーミングの単一応答を返すが、Anthropic へは内部でストリーミング
-  // として呼び、最終メッセージを集約する。SDK 0.80 は非ストリーミングで max_tokens が大きいと
-  // calculateNonstreamingTimeout のガードにより
-  // "Streaming is required for operations that may take longer than 10 minutes" を投げる
-  // （#676 で opus-5 の max_tokens が 128000 になり顕在化）。messages.stream() 経路には
-  // このガードが無いため回避できる。集約中のエラーは finalMessage() が reject し、
-  // 呼び出し側の try/catch が 500 として正直に返す（握り潰して部分応答を返さない）。
-  const finalMsg = await getClient().messages.stream(params).finalMessage();
-  const openaiResponse = convertResponse(finalMsg, requestedModel);
-  res.json(openaiResponse);
+  // 集約中のエラーは呼び出し側の try/catch が 500 として正直に返す（部分応答を返さない）。
+  const finalMsg = await streamMessage(anthropicReq);
+  res.json(convertResponse(finalMsg, requestedModel));
 }
 
-/**
- * tools付き非ストリーミングレスポンス処理。
- * tool_use ブロックをOpenAI tool_calls形式に変換して返す。
- * handleNonStreaming と同じ理由で、内部はストリーミングで呼んで最終メッセージを集約する。
- */
+/** tools付き非ストリーミング。tool_use を OpenAI tool_calls 形式に変換して返す。 */
 async function handleNonStreamingWithTools(
   res: Response,
   anthropicReq: Record<string, unknown>,
   requestedModel: string
 ): Promise<void> {
-  const finalMsg = await getClient()
-    .messages.stream(anthropicReq as any)
-    .finalMessage();
-  const openaiResponse = convertResponseWithTools(finalMsg, requestedModel);
-  res.json(openaiResponse);
+  const finalMsg = await streamMessage(anthropicReq);
+  res.json(convertResponseWithTools(finalMsg, requestedModel));
+}
+
+/**
+ * SSE 応答の共通処理。text はリアルタイムで流し、最終メッセージで finish を送る。
+ * クライアント切断時は上流を abort し、その abort は正常系として静かに終える（issue #3）。
+ */
+async function runSseStream(
+  res: Response,
+  anthropicReq: Record<string, unknown>,
+  requestedModel: string,
+  includeUsage: boolean,
+  writeFinal: (ctx: StreamContext, finalMsg: any) => void
+): Promise<void> {
+  const ctx = createStreamContext(requestedModel);
+  initSSE(res);
+  res.write(createInitialChunk(ctx.id, ctx.model, ctx.created));
+
+  const controller = new AbortController();
+  res.on("close", () => controller.abort());
+
+  try {
+    const finalMsg = await streamMessage(anthropicReq, controller.signal, (text) => {
+      if (!res.writableEnded) res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, text));
+    });
+    if (res.writableEnded) return;
+    writeFinal(ctx, finalMsg);
+    if (includeUsage && finalMsg.usage) {
+      res.write(createUsageChunk(ctx.id, ctx.model, ctx.created, finalMsg.usage));
+    }
+    sendDone(res);
+  } catch (error: unknown) {
+    if (controller.signal.aborted || isAbortError(error)) return;
+    console.error("Stream error:", error);
+    if (res.writableEnded) return;
+    const message = error instanceof Error ? error.message : String(error);
+    res.write(`data: ${JSON.stringify({ error: { message, type: "api_error" } })}\n\n`);
+    sendDone(res);
+  }
 }
 
 async function handleStreaming(
@@ -344,47 +395,9 @@ async function handleStreaming(
   requestedModel: string,
   includeUsage: boolean = false
 ): Promise<void> {
-  const { stream: _stream, ...params } = anthropicReq;
-  const ctx = createStreamContext(requestedModel);
-
-  initSSE(res);
-  res.write(createInitialChunk(ctx.id, ctx.model, ctx.created));
-
-  const stream = getClient().messages.stream(params);
-
-  // クライアント切断時の abort は SDK 内部の promise を APIUserAbortError で reject する。
-  // 観測しないと unhandledRejection でプロセスごと落ちる（issue #3・2026-08-17 の本番クラッシュ）。
-  // abort は「切断済みで返す相手がいない」正常系なので静かに終え、それ以外はログに出す。
-  stream.done().catch((error: unknown) => {
-    if (error instanceof Error && error.name === "APIUserAbortError") {
-      return;
-    }
-    console.error("Stream terminated with error:", error);
-  });
-
-  stream.on("text", (text: string) => {
-    res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, text));
-  });
-
-  stream.on("finalMessage", (finalMsg: any) => {
+  await runSseStream(res, anthropicReq, requestedModel, includeUsage, (ctx, finalMsg) => {
     const finishReason = finalMsg.stop_reason === "max_tokens" ? "length" : "stop";
     res.write(createFinalChunk(ctx.id, ctx.model, ctx.created, finishReason, finalMsg));
-    if (includeUsage && finalMsg.usage) {
-      res.write(createUsageChunk(ctx.id, ctx.model, ctx.created, finalMsg.usage));
-    }
-    sendDone(res);
-  });
-
-  stream.on("error", (error: Error) => {
-    console.error("Stream error:", error);
-    res.write(
-      `data: ${JSON.stringify({ error: { message: error.message, type: "api_error" } })}\n\n`
-    );
-    sendDone(res);
-  });
-
-  res.on("close", () => {
-    stream.abort();
   });
 }
 
@@ -399,31 +412,8 @@ async function handleStreamingWithTools(
   requestedModel: string,
   includeUsage: boolean = false
 ): Promise<void> {
-  const ctx = createStreamContext(requestedModel);
-
-  initSSE(res);
-  res.write(createInitialChunk(ctx.id, ctx.model, ctx.created));
-
-  const stream = getClient().messages.stream(anthropicReq as any);
-
-  // クライアント切断時の abort を観測する（issue #3。handleStreaming と同じ理由）。
-  stream.done().catch((error: unknown) => {
-    if (error instanceof Error && error.name === "APIUserAbortError") {
-      return;
-    }
-    console.error("Stream terminated with error:", error);
-  });
-
-  // テキスト部分はリアルタイムでストリーム
-  stream.on("text", (text: string) => {
-    res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, text));
-  });
-
-  stream.on("finalMessage", (finalMsg: any) => {
-    // tool_callsが含まれている場合は最終メッセージをDeltaとして送信
-    const toolCalls = (finalMsg.content ?? []).filter(
-      (c: any) => c.type === "tool_use"
-    );
+  await runSseStream(res, anthropicReq, requestedModel, includeUsage, (ctx, finalMsg) => {
+    const toolCalls = (finalMsg.content ?? []).filter((c: any) => c.type === "tool_use");
     if (toolCalls.length > 0) {
       const toolCallsFormatted = toolCalls.map((tc: any, idx: number) => ({
         index: idx,
@@ -431,8 +421,7 @@ async function handleStreamingWithTools(
         type: "function" as const,
         function: {
           name: tc.name,
-          arguments:
-            typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input),
+          arguments: typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input),
         },
       }));
       const delta = JSON.stringify({
@@ -443,37 +432,19 @@ async function handleStreamingWithTools(
         choices: [
           {
             index: 0,
-            delta: {
-              role: "assistant",
-              content: null,
-              tool_calls: toolCallsFormatted,
-            },
+            delta: { role: "assistant", content: null, tool_calls: toolCallsFormatted },
             finish_reason: "tool_calls",
           },
         ],
       });
       res.write(`data: ${delta}\n\n`);
     }
-    // Anthropicメタデータ付き最終チャンクを送信
-    const finishReason = toolCalls.length > 0 || finalMsg.stop_reason === "tool_use"
-      ? "tool_calls"
-      : finalMsg.stop_reason === "max_tokens" ? "length" : "stop";
+    const finishReason =
+      toolCalls.length > 0 || finalMsg.stop_reason === "tool_use"
+        ? "tool_calls"
+        : finalMsg.stop_reason === "max_tokens"
+        ? "length"
+        : "stop";
     res.write(createFinalChunk(ctx.id, ctx.model, ctx.created, finishReason, finalMsg));
-    if (includeUsage && finalMsg.usage) {
-      res.write(createUsageChunk(ctx.id, ctx.model, ctx.created, finalMsg.usage));
-    }
-    sendDone(res);
-  });
-
-  stream.on("error", (error: Error) => {
-    console.error("Stream error:", error);
-    res.write(
-      `data: ${JSON.stringify({ error: { message: error.message, type: "api_error" } })}\n\n`
-    );
-    sendDone(res);
-  });
-
-  res.on("close", () => {
-    stream.abort();
   });
 }
