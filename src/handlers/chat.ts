@@ -3,6 +3,7 @@ import { createAnthropicClient, resolveAuth } from "../utils/auth";
 import {
   convertRequest,
   convertResponse,
+  resolveMaxTokens,
   resolveTemperature,
   OpenAIChatRequest,
 } from "../utils/convert";
@@ -173,7 +174,7 @@ function hasTools(body: any): boolean {
  * tools付きリクエストをAnthropicフォーマットに変換する。
  * convertRequest (変更不可) はtoolsを扱わないため、このパスで補完。
  */
-function buildAnthropicRequestWithTools(
+export function buildAnthropicRequestWithTools(
   body: any,
   authToken?: string
 ): Record<string, unknown> {
@@ -199,7 +200,7 @@ function buildAnthropicRequestWithTools(
   const req: Record<string, unknown> = {
     model: body.model,
     messages: anthropicMessages,
-    max_tokens: body.max_tokens ?? 4096,
+    max_tokens: resolveMaxTokens(body),
     tools: anthropicTools,
   };
 
