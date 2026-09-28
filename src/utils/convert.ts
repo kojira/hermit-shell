@@ -46,6 +46,7 @@ export interface OpenAIChatRequest {
   model: string;
   messages: OpenAIMessage[];
   max_tokens?: number;
+  max_completion_tokens?: number;
   temperature?: number;
   stream?: boolean;
 }
@@ -59,6 +60,12 @@ export interface AnthropicRequest {
   stream?: boolean;
 }
 
+// Honor the legacy field when both are supplied, preserving existing callers.
+// Pi sends max_completion_tokens for OpenAI-compatible models by default.
+export function resolveMaxTokens(req: Pick<OpenAIChatRequest, "max_tokens" | "max_completion_tokens">): number {
+  return req.max_tokens ?? req.max_completion_tokens ?? 4096;
+}
+
 export function convertRequest(req: OpenAIChatRequest, apiKey?: string): AnthropicRequest {
   const systemMessages = req.messages.filter((m) => m.role === "system");
   const nonSystemMessages = req.messages.filter((m) => m.role !== "system");
@@ -69,7 +76,7 @@ export function convertRequest(req: OpenAIChatRequest, apiKey?: string): Anthrop
       role: m.role as "user" | "assistant",
       content: m.content,
     })),
-    max_tokens: req.max_tokens || 4096,
+    max_tokens: resolveMaxTokens(req),
   };
 
   const systemBlocks: Array<{type: string; text: string}> = [];
