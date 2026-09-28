@@ -7,6 +7,8 @@
  * ここでは受信中は文字列として連結するだけにして、ブロック完了時に一度だけ解釈する。
  */
 
+import { partialParse } from "@anthropic-ai/sdk/_vendor/partial-json-parser/parser";
+
 type AnyRecord = Record<string, any>;
 
 
@@ -49,16 +51,26 @@ export function escapeControlCharsInJsonStrings(json: string): string {
   return out;
 }
 
-/** 完成した tool 引数 JSON を解釈する。空は {}。制御文字だけは救済し、それ以外の不正は例外。 */
+/**
+ * 受信済みの tool 引数 JSON を解釈する。空は {}。
+ * 通常の parse → 制御文字を救済した parse → 途中までの JSON（max_tokens 打ち切り等）
+ * を SDK と同じ partial parser で解釈、の順に試し、応答全体を失わない。
+ * どれも解釈できない場合だけ生文字列を input として返す（変換側は文字列 input を素通しする）。
+ */
 export function parseToolInputJson(json: string): unknown {
   if (json.trim() === "") return {};
   try {
     return JSON.parse(json);
-  } catch (error) {
+  } catch {
+    const escaped = escapeControlCharsInJsonStrings(json);
     try {
-      return JSON.parse(escapeControlCharsInJsonStrings(json));
+      return JSON.parse(escaped);
     } catch {
-      throw error;
+      try {
+        return partialParse(escaped);
+      } catch {
+        return json;
+      }
     }
   }
 }
@@ -154,10 +166,6 @@ export class MessageAccumulator {
     for (const block of this.snapshot.content) this.finalizeBlock(block);
     return this.snapshot;
   }
-}
-
-export interface RawEventStream extends AsyncIterable<AnyRecord> {
-  controller: AbortController;
 }
 
 /**

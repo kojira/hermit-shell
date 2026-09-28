@@ -373,7 +373,8 @@ async function runSseStream(
     const finalMsg = await streamMessage(anthropicReq, controller.signal, (text) => {
       if (!res.writableEnded) res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, text));
     });
-    if (res.writableEnded) return;
+    // 切断時 SDK の反復は静かに終わり部分メッセージが返るため、書き込まずに終える。
+    if (controller.signal.aborted || res.writableEnded) return;
     writeFinal(ctx, finalMsg);
     if (includeUsage && finalMsg.usage) {
       res.write(createUsageChunk(ctx.id, ctx.model, ctx.created, finalMsg.usage));

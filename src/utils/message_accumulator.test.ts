@@ -47,8 +47,10 @@ test("tool without input deltas keeps its start input", async () => {
   assert.deepEqual(msg.content[1].input, {});
 });
 
-test("structurally invalid tool JSON still fails honestly", async () => {
-  await assert.rejects(accumulateMessage(events(toolStream(['{"a":']))), SyntaxError);
+test("tool input truncated by max_tokens keeps the partial input and the text", async () => {
+  const msg = await accumulateMessage(events(toolStream(['{"a":"x\ny","b":'])));
+  assert.equal(msg.content[0].text, "Run");
+  assert.deepEqual(msg.content[1].input, { a: "x\ny" });
 });
 
 test("control escaping touches only string contents", () => {
