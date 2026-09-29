@@ -14,3 +14,14 @@ test("publishes claude-opus-5-5 and removes the dotted alias", () => {
   assert.ok(body.data.some((model: { id: string }) => model.id === "claude-opus-5-5"));
   assert.ok(!body.data.some((model: { id: string }) => model.id === "claude-opus-5.5"));
 });
+
+test("publishes claude-sonnet-5-5", () => {
+  let body: any;
+  handleModels({} as Request, {
+    json(value: unknown) {
+      body = value;
+    },
+  } as Response);
+
+  assert.ok(body.data.some((model: { id: string }) => model.id === "claude-sonnet-5-5"));
+});
