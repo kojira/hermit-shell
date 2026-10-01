@@ -12,7 +12,12 @@ import {
 
 const app = express();
 
-app.use(express.json({ limit: "10mb" }));
+// Anthropic's Messages API accepts request bodies up to 32 MB. Image-heavy
+// conversations (base64 screenshots) routinely exceed the old 10 MB bound
+// even though upstream would accept them.
+export const REQUEST_BODY_LIMIT = "32mb";
+
+app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", version: "1.0.0" });
