@@ -19,6 +19,12 @@ import {
 } from "../utils/stream";
 import { accumulateMessage } from "../utils/message_accumulator";
 import {
+  fetchWithoutRateLimitRetries,
+  isRateLimitError,
+  rateLimitErrorBody,
+  rateLimitRetryAfter,
+} from "../utils/rate_limit";
+import {
   openaiToolsToAnthropic,
   openaiMessagesToAnthropic,
   extractSystemBlocks,
@@ -150,7 +156,7 @@ let client: ReturnType<typeof createAnthropicClient> | null = null;
 
 function getClient() {
   if (!client) {
-    client = createAnthropicClient();
+    client = createAnthropicClient({ fetch: fetchWithoutRateLimitRetries });
   }
   return client;
 }
@@ -291,6 +297,7 @@ export async function handleChatCompletions(
   } catch (error: any) {
     console.error("Chat completion error:", error);
 
+    if (sendRateLimitResponse(res, error)) return;
     const status = error.status || error.statusCode || 500;
     const message = error.message || "Internal server error";
 
@@ -305,6 +312,19 @@ export async function handleChatCompletions(
   }
 }
 
+function sendRateLimitResponse(res: Response, error: unknown): boolean {
+  if (!isRateLimitError(error)) return false;
+  if (res.headersSent) {
+    res.write(`data: ${JSON.stringify({ error: { ...rateLimitErrorBody(), status: 429 } })}\n\n`);
+    sendDone(res);
+  } else {
+    const retryAfter = rateLimitRetryAfter(error);
+    if (retryAfter !== undefined) res.setHeader("Retry-After", retryAfter);
+    res.status(429).json({ error: rateLimitErrorBody() });
+  }
+  return true;
+}
+
 /**
  * Anthropic へストリーミングで要求し、生イベントから最終メッセージを組み立てる。
  * SDK の MessageStream は tool 引数を受信中に逐次 parse し、生の制御文字で例外を
@@ -314,13 +334,15 @@ export async function handleChatCompletions(
 async function streamMessage(
   params: Record<string, unknown>,
   signal?: AbortSignal,
-  onText?: (text: string) => void
+  onText?: (text: string) => void,
+  onOpen?: () => void
 ): Promise<any> {
   const { stream: _stream, ...rest } = params;
   const events = await getClient().messages.create(
     { ...(rest as any), stream: true },
     signal ? { signal } : undefined
   );
+  onOpen?.();
   return accumulateMessage(events as any, onText);
 }
 
@@ -363,8 +385,11 @@ async function runSseStream(
   writeFinal: (ctx: StreamContext, finalMsg: any) => void
 ): Promise<void> {
   const ctx = createStreamContext(requestedModel);
-  initSSE(res);
-  res.write(createInitialChunk(ctx.id, ctx.model, ctx.created));
+  const openSSE = () => {
+    if (res.destroyed || res.writableEnded) return;
+    initSSE(res);
+    res.write(createInitialChunk(ctx.id, ctx.model, ctx.created));
+  };
 
   const controller = new AbortController();
   res.on("close", () => controller.abort());
@@ -372,7 +397,7 @@ async function runSseStream(
   try {
     const finalMsg = await streamMessage(anthropicReq, controller.signal, (text) => {
       if (!res.writableEnded) res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, text));
-    });
+    }, openSSE);
     // 切断時 SDK の反復は静かに終わり部分メッセージが返るため、書き込まずに終える。
     if (controller.signal.aborted || res.writableEnded) return;
     writeFinal(ctx, finalMsg);
@@ -384,6 +409,9 @@ async function runSseStream(
     if (controller.signal.aborted || isAbortError(error)) return;
     console.error("Stream error:", error);
     if (res.writableEnded) return;
+    if (sendRateLimitResponse(res, error)) return;
+    // Keep the existing HTTP200/generic SSE error contract for non-rate-limit failures.
+    if (!res.headersSent) openSSE();
     const message = error instanceof Error ? error.message : String(error);
     res.write(`data: ${JSON.stringify({ error: { message, type: "api_error" } })}\n\n`);
     sendDone(res);

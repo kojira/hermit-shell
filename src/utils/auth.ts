@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import type { ClientOptions } from "@anthropic-ai/sdk";
 
 export type AuthResult =
   | { method: "env-api-key"; apiKey: string }
@@ -42,9 +43,10 @@ const OAUTH_BETA = `claude-code-20250219,oauth-2025-04-20,${BASE_BETA},interleav
  * ——検証で通した組み立てと本番の組み立てがズレて「検証は通ったのに本番で失敗」を
  * 起こさないため。
  */
-function buildAuthTokenClient(authToken: string) {
+function buildAuthTokenClient(authToken: string, options: Pick<ClientOptions, "fetch"> = {}) {
   const Anthropic = require("@anthropic-ai/sdk");
   return new Anthropic.default({
+    ...options,
     authToken,
     defaultHeaders: {
       "anthropic-beta": OAUTH_BETA,
@@ -54,21 +56,23 @@ function buildAuthTokenClient(authToken: string) {
   });
 }
 
-export function createAnthropicClient() {
+export function createAnthropicClient(options: Pick<ClientOptions, "fetch"> = {}) {
   const Anthropic = require("@anthropic-ai/sdk");
   const auth = resolveAuth();
 
   switch (auth.method) {
     case "env-api-key":
       return new Anthropic.default({
+        ...options,
         apiKey: auth.apiKey,
         defaultHeaders: { "anthropic-beta": BASE_BETA },
       });
     case "env-auth-token":
-      return buildAuthTokenClient(auth.authToken);
+      return buildAuthTokenClient(auth.authToken, options);
     case "none":
     default:
       return new Anthropic.default({
+        ...options,
         defaultHeaders: { "anthropic-beta": BASE_BETA },
       });
   }
