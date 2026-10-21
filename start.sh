@@ -14,6 +14,10 @@ if [ -f "$SCRIPT_DIR/.hermit-auth" ]; then
     export ANTHROPIC_AUTH_TOKEN
 fi
 
+# Resolve the managed runtime before touching an existing process.
+NODE="$("$SCRIPT_DIR/scripts/node.sh" -p 'process.execPath')"
+export PATH="$(dirname "$NODE"):$PATH"
+
 # Already running?
 if [ -f "$PIDFILE" ]; then
     OLD_PID=$(cat "$PIDFILE")
@@ -29,7 +33,7 @@ if [ -f "$PIDFILE" ]; then
 fi
 
 # Start in background
-nohup node dist/index.js >> "$LOGFILE" 2>&1 &
+nohup "$NODE" dist/index.js >> "$LOGFILE" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "$PIDFILE"
 
