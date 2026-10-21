@@ -22,8 +22,14 @@
 
 ## セットアップ
 
+[mise](https://mise.jdx.dev/) をインストールしてから、固定 Node **22.23.4** を使います。
+既存の pnpm と lockfile は変更しません。
+
 ```bash
-pnpm install
+mise trust
+mise install
+mise exec -- pnpm install --frozen-lockfile --ignore-scripts
+mise exec -- node --test scripts/node.integration.mjs
 ```
 
 ### 認証の優先順位
@@ -43,12 +49,24 @@ Claude Code をインストール済みであれば、追加設定なしで動�
 
 ```bash
 # 開発（ts-node）
-pnpm run dev
+mise exec -- pnpm run dev
 
 # ビルド後に実行
-pnpm run build
-pnpm start
+mise exec -- pnpm run build
+mise exec -- pnpm start
 ```
+
+バックグラウンド起動は `./start.sh`。認証・HOST/PORT・ログ/PID の扱いは従来のままです。
+`start.sh` と `pnpm start` は `scripts/node.sh` でリポジトリの Node を選択し、子プロセスの
+PATH にも適用します。`mise` はサービスの明示 PATH に必要です。先に `mise install` を行い、
+未導入時は環境内の別 Node にフォールバックしません。
+
+pin の変更だけでは既存プロセスは更新されません。稼働環境の切替は別途承認された停止可能な
+時間帯に実施し、設定・認証・待受 HOST/PORT と検証済み JS を保持してください。
+この変更のためにアプリケーションの版まで同時更新する必要はありません。
+起動設定・旧 Node・旧成果物を退避し、処理を drain した後に切替え、実際にロードされた
+実行ファイルと `/health` を確認します。rollback は退避した設定・成果物へ戻しますが、
+脆弱な旧 Node への復帰は一時復旧でありセキュリティ更新の完了ではありません。
 
 デフォルトポートは `8765`。`PORT` 環境変数で変更可能。
 

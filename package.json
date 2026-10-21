@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
-    "start": "node dist/index.js",
+    "start": "./scripts/node.sh dist/index.js",
     "test": "tsc && node --test dist/utils/*.test.js dist/handlers/*.test.js"
   },
   "dependencies": {
