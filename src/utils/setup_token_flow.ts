@@ -26,6 +26,7 @@ export type SetupTokenState =
   | { state: "waiting_for_cli" }
   | { state: "verifying" }
   | { state: "success" }
+  | { state: "manual_token_required"; message: string }
   | { state: "error"; message: string };
 
 export type PublicSetupTokenStatus = SetupTokenState;
@@ -41,6 +42,7 @@ interface SetupTokenFlowDependencies {
   resetClient: () => void;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  authUrlTimeoutMs?: number;
 }
 
 const TOKEN_PATTERN = /sk-ant-oat01-[A-Za-z0-9_-]{20,1024}/;
@@ -48,6 +50,18 @@ const SETUP_TOKEN_LENGTH = 108;
 const SETUP_TOKEN_SUFFIX_LENGTH = SETUP_TOKEN_LENGTH - "sk-ant-oat01-".length;
 const URL_PATTERN = /https:\/\/[^\s\x00-\x1f\x7f]+/g;
 const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
+/**
+ * Claude Code 2.1.x はOAuth URLをstdoutへ出さず「Opening browser to sign in…」だけを
+ * 表示するため、URLが来ないまま待ち続けずに手動トークン入力へ切り替える。
+ */
+export const MANUAL_TOKEN_REQUIRED_MESSAGE =
+  "Claude CLIがブラウザ用のURLを表示しませんでした。ホストのターミナルで `claude setup-token` を実行し、ブラウザでログインして表示された `sk-ant-oat01-…` トークンを、このページの「トークンを手動入力」欄に貼り付けて「検証して適用」を押してください。";
+const BROWSER_OPENED_PATTERN = /opening browser to sign in/i;
+/** URLが一度も現れないまま待つ上限。[authUrlTimeoutMs] で上書きできる。 */
+const AUTH_URL_TIMEOUT_MS = 20_000;
+/** 「Opening browser」だけが出た場合に、URLの遅延到着を待つ猶予。 */
+const AUTH_URL_MARKER_GRACE_MS = 5_000;
+
 const AUTH_CODE_FAILURE_PHRASES = [
   "Authentication failed: Invalid authorization code",
   "Token exchange failed (",
@@ -87,11 +101,16 @@ function officialClaudeAuthUrl(value: string): string | null {
 }
 
 export class ClaudeSetupTokenFlow {
-  private readonly deps: Required<Pick<SetupTokenFlowDependencies, "timeoutMs" | "maxOutputBytes">> &
-    Omit<SetupTokenFlowDependencies, "timeoutMs" | "maxOutputBytes">;
+  private readonly deps: Required<
+    Pick<SetupTokenFlowDependencies, "timeoutMs" | "maxOutputBytes" | "authUrlTimeoutMs">
+  > &
+    Omit<SetupTokenFlowDependencies, "timeoutMs" | "maxOutputBytes" | "authUrlTimeoutMs">;
   private current: SetupTokenState = { state: "idle" };
   private child: SetupTokenChild | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private authUrlTimer: NodeJS.Timeout | null = null;
+  private authUrlGraceMs: number;
+  private browserOpenedSeen = false;
   private outputBytes = 0;
   private scanTail = "";
   private bestAuthUrlQueryKeys = 0;
@@ -109,7 +128,9 @@ export class ClaudeSetupTokenFlow {
       ...deps,
       timeoutMs: deps.timeoutMs ?? 10 * 60 * 1_000,
       maxOutputBytes: deps.maxOutputBytes ?? 256 * 1_024,
+      authUrlTimeoutMs: deps.authUrlTimeoutMs ?? AUTH_URL_TIMEOUT_MS,
     };
+    this.authUrlGraceMs = Math.min(AUTH_URL_MARKER_GRACE_MS, this.deps.authUrlTimeoutMs);
   }
 
   status(): SetupTokenState {
@@ -125,6 +146,7 @@ export class ClaudeSetupTokenFlow {
 
     this.finished = true;
     this.clearTimer();
+    this.clearAuthUrlTimer();
     const child = this.child;
     this.child = null;
     this.capturedToken = null;
@@ -159,6 +181,8 @@ export class ClaudeSetupTokenFlow {
     try {
       this.child.stdin.write(`${trimmed}\n`);
       this.scanTail = "";
+      // The URL deadline only guards the pre-code wait; the CLI owns the rest.
+      this.clearAuthUrlTimer();
       this.current = { state: "waiting_for_cli" };
       this.trace("code_submitted", {
         length: trimmed.length,
@@ -199,6 +223,7 @@ export class ClaudeSetupTokenFlow {
       this.fail("Claude認証を開始できませんでした", true, "child_error");
     });
     child.on("close", (code) => void this.handleClose(code));
+    this.armAuthUrlDeadline(this.deps.authUrlTimeoutMs);
     this.timer = setTimeout(() => {
       this.trace("flow_timeout", { timeoutMs: this.deps.timeoutMs });
       this.fail("Claude認証が時間切れになりました", true, "timeout");
@@ -209,6 +234,8 @@ export class ClaudeSetupTokenFlow {
 
   private resetAttempt(): void {
     this.clearTimer();
+    this.clearAuthUrlTimer();
+    this.browserOpenedSeen = false;
     this.child = null;
     this.outputBytes = 0;
     this.scanTail = "";
@@ -247,6 +274,7 @@ export class ClaudeSetupTokenFlow {
         const retry = this.current.state === "waiting_for_cli";
         this.bestAuthUrlQueryKeys = queryKeys;
         this.current = { state: "waiting_for_user", authUrl };
+        this.clearAuthUrlTimer();
         this.trace("auth_url_ready", { retry, queryKeys });
       } else {
         this.trace("partial_auth_url_ignored", { queryKeys });
@@ -254,6 +282,16 @@ export class ClaudeSetupTokenFlow {
     }
 
     const clean = stripAnsi(raw);
+    if (
+      BROWSER_OPENED_PATTERN.test(clean) &&
+      this.current.state === "waiting_for_user" &&
+      !this.current.authUrl &&
+      !this.browserOpenedSeen
+    ) {
+      this.browserOpenedSeen = true;
+      this.armAuthUrlDeadline(this.authUrlGraceMs);
+      this.trace("browser_opened_without_url", { graceMs: this.authUrlGraceMs });
+    }
     if (chunkText.includes("HERMIT_AUTH_CODE_SEND_BEGIN")) {
       this.trace("code_send_begin");
     }
@@ -327,6 +365,7 @@ export class ClaudeSetupTokenFlow {
     if (this.finished) return;
     this.trace("cli_closed", { code });
     this.clearTimer();
+    this.clearAuthUrlTimer();
     if (code !== 0 || !this.capturedToken) {
       this.fail("Claude認証を完了できませんでした", false, "cli_exit_without_token");
       return;
@@ -350,16 +389,59 @@ export class ClaudeSetupTokenFlow {
       this.trace("token_applied");
       this.finished = true;
       this.child = null;
+      this.clearAuthUrlTimer();
       this.current = { state: "success" };
     } catch {
       this.fail("Claude認証を適用できませんでした", false, "apply_failed");
     }
   }
 
+  /**
+   * The CLI never produced an OAuth URL within the bounded window, so the page
+   * cannot drive the browser login any more. Stop the child and hand the user
+   * the manual token path instead of polling `waiting_for_user` forever.
+   */
+  private requireManualToken(reason: string): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.clearTimer();
+    this.clearAuthUrlTimer();
+    const child = this.child;
+    this.child = null;
+    this.capturedToken = null;
+    this.scanTail = "";
+    if (child) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // The CLI may already have exited. The public state stays the same.
+      }
+    }
+    this.current = { state: "manual_token_required", message: MANUAL_TOKEN_REQUIRED_MESSAGE };
+    this.trace("manual_token_required", { reason, childTerminated: Boolean(child) });
+  }
+
+  private armAuthUrlDeadline(delayMs: number): void {
+    this.clearAuthUrlTimer();
+    const timer = setTimeout(() => {
+      this.authUrlTimer = null;
+      if (this.current.state !== "waiting_for_user" || this.current.authUrl) return;
+      this.requireManualToken("auth_url_unavailable");
+    }, delayMs);
+    timer.unref?.();
+    this.authUrlTimer = timer;
+  }
+
+  private clearAuthUrlTimer(): void {
+    if (this.authUrlTimer) clearTimeout(this.authUrlTimer);
+    this.authUrlTimer = null;
+  }
+
   private fail(message: string, kill = true, reason = "unspecified"): void {
     if (this.finished) return;
     this.finished = true;
     this.clearTimer();
+    this.clearAuthUrlTimer();
     const child = this.child;
     this.child = null;
     this.capturedToken = null;
@@ -389,6 +471,7 @@ export class ClaudeSetupTokenFlow {
     if (chunkText.includes("HERMIT_SUCCESS_CONTINUE_SEND_BEGIN")) classifications.push("continue_send_begin");
     if (chunkText.includes("HERMIT_SUCCESS_CONTINUE_ENTER_SENT")) classifications.push("continue_enter_sent");
     if (chunkText.includes("OAuth error: Request failed with status code 400")) classifications.push("oauth_400");
+    if (BROWSER_OPENED_PATTERN.test(chunkText)) classifications.push("browser_opened_marker");
     if (/press enter/i.test(chunkText)) classifications.push("press_enter_prompt");
     if (/authentication successful|successfully authenticated/i.test(chunkText)) {
       classifications.push("authentication_success");
