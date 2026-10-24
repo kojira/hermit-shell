@@ -419,10 +419,17 @@ test("shows the official link and stays waiting while the CLI prints the URL", a
 });
 
 test("switches to manual token entry when the CLI only opens a browser", async () => {
+  const logs: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => logs.push(args.join(" "));
   const { flow, child, applied, resets } = makeFlow({ authUrlTimeoutMs: 10 });
   flow.start();
-  child.stdout.emit("data", Buffer.from("Opening browser to sign in…\n"));
+  // The PTY renders the line word by word, so no spaces appear in the stream.
+  child.stdout.emit("data", Buffer.from("\u001b[>0q·Openingbrowsertosignin…\n"));
   await new Promise((resolve) => setTimeout(resolve, 60));
+
+  // The marker is what shortens the wait; it must be recognised as such.
+  assert.match(logs.join("\n"), /browser_opened_without_url/);
 
   const status = flow.status();
   assert.equal(status.state, "manual_token_required");
@@ -441,6 +448,7 @@ test("switches to manual token entry when the CLI only opens a browser", async (
   await settle();
   assert.equal(flow.status().state, "manual_token_required");
   assert.deepEqual(applied, []);
+  console.info = originalInfo;
 });
 
 test("switches to manual token entry when no URL appears within the window", async () => {

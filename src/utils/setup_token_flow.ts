@@ -56,7 +56,11 @@ const ANSI_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
  */
 export const MANUAL_TOKEN_REQUIRED_MESSAGE =
   "Claude CLIがブラウザ用のURLを表示しませんでした。ホストのターミナルで `claude setup-token` を実行し、ブラウザでログインして表示された `sk-ant-oat01-…` トークンを、このページの「トークンを手動入力」欄に貼り付けて「検証して適用」を押してください。";
-const BROWSER_OPENED_PATTERN = /opening browser to sign in/i;
+/**
+ * The PTY stream renders that line word by word, so live output looks like
+ * "Openingbrowsertosignin…" and only the spaced form has spaces.
+ */
+const BROWSER_OPENED_PATTERN = /opening\s*browser\s*to\s*sign\s*in/i;
 /** URLが一度も現れないまま待つ上限。[authUrlTimeoutMs] で上書きできる。 */
 const AUTH_URL_TIMEOUT_MS = 20_000;
 /** 「Opening browser」だけが出た場合に、URLの遅延到着を待つ猶予。 */
