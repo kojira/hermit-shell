@@ -401,3 +401,96 @@ test("setup page keeps manual entry and makes browser login explicitly human-ope
     else process.env.ANTHROPIC_AUTH_TOKEN = previous;
   }
 });
+
+test("shows the official link and stays waiting while the CLI prints the URL", async () => {
+  const { flow, child } = makeFlow({ authUrlTimeoutMs: 10 });
+  flow.start();
+  child.stdout.emit(
+    "data",
+    Buffer.from("Opening browser to sign in…\nhttps://claude.com/cai/oauth/authorize?code=true\n")
+  );
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
+  assert.deepEqual(flow.status(), {
+    state: "waiting_for_user",
+    authUrl: "https://claude.com/cai/oauth/authorize?code=true",
+  });
+  assert.equal(child.killed, false);
+});
+
+test("switches to manual token entry when the CLI only opens a browser", async () => {
+  const { flow, child, applied, resets } = makeFlow({ authUrlTimeoutMs: 10 });
+  flow.start();
+  child.stdout.emit("data", Buffer.from("Opening browser to sign in…\n"));
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  const status = flow.status();
+  assert.equal(status.state, "manual_token_required");
+  assert.match(
+    status.state === "manual_token_required" ? status.message : "",
+    /claude setup-token/
+  );
+  assert.equal(child.killed, true);
+  assert.deepEqual(applied, []);
+  assert.equal(resets(), 0);
+  // The hint names the token prefix, but no captured token value leaks here.
+  assert.doesNotMatch(JSON.stringify(status), /sk-ant-oat01-[A-Za-z0-9]{20,}/);
+
+  // A late CLI close must not resurrect the old flow.
+  child.emit("close", 0, null);
+  await settle();
+  assert.equal(flow.status().state, "manual_token_required");
+  assert.deepEqual(applied, []);
+});
+
+test("switches to manual token entry when no URL appears within the window", async () => {
+  let activeChild = new FakeChild();
+  const { flow, applied } = makeFlow({
+    authUrlTimeoutMs: 10,
+    spawn: () => activeChild,
+  });
+  flow.start();
+  activeChild.stdout.emit("data", Buffer.from("spinner\n"));
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  assert.equal(flow.status().state, "manual_token_required");
+  assert.equal(activeChild.killed, true);
+  assert.deepEqual(applied, []);
+
+  // Restarting from the manual handover is allowed and uses a fresh child.
+  activeChild = new FakeChild();
+  assert.deepEqual(flow.start(), { started: true });
+  activeChild.stdout.emit(
+    "data",
+    Buffer.from("https://claude.com/cai/oauth/authorize?code=true\n")
+  );
+  assert.deepEqual(flow.status(), {
+    state: "waiting_for_user",
+    authUrl: "https://claude.com/cai/oauth/authorize?code=true",
+  });
+});
+
+test("does not arm the URL deadline once the user submitted an authorization code", async () => {
+  const { flow, child } = makeFlow({ authUrlTimeoutMs: 10 });
+  flow.start();
+  child.stdout.emit(
+    "data",
+    Buffer.from("https://claude.com/cai/oauth/authorize?code=true\n")
+  );
+  flow.submitAuthorizationCode("valid-code#valid-state");
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.deepEqual(flow.status(), { state: "waiting_for_cli" });
+  assert.equal(child.killed, false);
+});
+
+test("setup page never renders a link without an href and explains the manual fallback", () => {
+  const html = renderPage();
+  assert.doesNotMatch(html, /id="claude-auth-link"[^>]*href/);
+  assert.doesNotMatch(html, /claudeAuthLink\.href = '#'/);
+  assert.match(html, /id="claude-manual-hint"/);
+  assert.match(html, /<code>claude setup-token<\/code>/);
+  assert.match(html, /sk-ant-oat01-…/);
+  assert.match(html, /トークンを手動入力/);
+  assert.match(html, /data\.state === 'manual_token_required'/);
+  assert.match(html, /hideAuthLink\(\)/);
+});

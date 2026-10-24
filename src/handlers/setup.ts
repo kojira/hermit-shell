@@ -141,6 +141,9 @@ export function renderPage(): string {
   #result.err, #claude-result.err { display: block; background: #fdeaea; border: 1px solid #e0a3a3; }
   #claude-result { margin-top: 12px; padding: 10px; border-radius: 6px; display: none; white-space: pre-wrap; }
   #claude-result.ok { display: block; background: #e7f6e7; border: 1px solid #86c586; }
+  #claude-manual-hint { margin-top: 16px; padding: 12px; border: 1px solid #e0c98a; background: #fdf7e3; border-radius: 6px; display: none; }
+  #claude-manual-hint ol { margin: 8px 0 0; padding-left: 20px; }
+  #claude-manual-hint li { margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -155,10 +158,21 @@ export function renderPage(): string {
   <button id="claude-login">Claudeで再認証</button>
   <button id="claude-cancel" style="display:none">認証を中止してやり直す</button>
   <div id="claude-code-area" style="display:none; margin-top:16px">
-    <p><a id="claude-auth-link" href="#" target="_blank" rel="noopener" style="display:none">Claude公式認証ページを開く</a></p>
+    <p><a id="claude-auth-link" target="_blank" rel="noopener" style="display:none">Claude公式認証ページを開く</a></p>
     <label for="claude-code">Claude認証コード（セットアップトークンではありません）</label>
     <input id="claude-code" type="password" autocomplete="off" placeholder="Claude公式ページの「コードをコピー」から貼り付け">
     <button id="claude-code-submit">Claudeへ続行</button>
+  </div>
+  <div id="claude-manual-hint">
+    <strong>この画面からブラウザ認証を続けられませんでした。</strong>
+    <p class="muted">Claude CLI 2.1系はブラウザ用のURLを表示しないため、ホストのターミナルで直接トークンを発行してください。</p>
+    <ol>
+      <li>ホスト（この hermit-shell が動いているマシン）のターミナルで <code>claude setup-token</code> を実行する</li>
+      <li>開いたブラウザで Claude にログインし、認可を完了する</li>
+      <li>ターミナルに表示される <code>sk-ant-oat01-…</code> トークンをコピーする</li>
+      <li>下の「トークンを手動入力」欄に貼り付け、「検証して適用」を押す</li>
+    </ol>
+    <p class="muted" id="claude-manual-hint-detail"></p>
   </div>
   <div id="claude-result"></div>
 </div>
@@ -177,9 +191,30 @@ export function renderPage(): string {
   const claudeAuthLink = document.getElementById('claude-auth-link');
   const claudeCodeInput = document.getElementById('claude-code');
   const claudeCodeSubmit = document.getElementById('claude-code-submit');
+  const claudeManualHint = document.getElementById('claude-manual-hint');
+  const claudeManualHintDetail = document.getElementById('claude-manual-hint-detail');
   const claudeResult = document.getElementById('claude-result');
   let statusTimer = null;
   let claudeAuthWindow = null;
+
+  // The auth link points at a URL only the CLI can produce; never leave a
+  // clickable link with no href behind.
+  function hideAuthLink() {
+    claudeAuthLink.removeAttribute('href');
+    claudeAuthLink.style.display = 'none';
+  }
+
+  function showManualHint(detail) {
+    claudeManualHintDetail.textContent = detail || '';
+    claudeManualHint.style.display = 'block';
+    hideAuthLink();
+    claudeCodeArea.style.display = 'none';
+  }
+
+  function hideManualHint() {
+    claudeManualHint.style.display = 'none';
+    claudeManualHintDetail.textContent = '';
+  }
 
   async function pollClaudeStatus() {
     try {
@@ -196,6 +231,7 @@ export function renderPage(): string {
             claudeAuthWindow.location.replace(data.authUrl);
             claudeAuthWindow = null;
           }
+          hideManualHint();
           claudeAuthLink.href = data.authUrl;
           claudeAuthLink.style.display = 'inline-block';
           claudeCodeSubmit.disabled = false;
@@ -206,14 +242,28 @@ export function renderPage(): string {
         claudeCancelBtn.style.display = 'inline-block';
         claudeResult.style.display = 'block';
         claudeResult.textContent = 'Claude CLIで認証を完了しています...';
-        claudeAuthLink.style.display = 'none';
+        hideAuthLink();
         claudeCodeArea.style.display = 'none';
+      } else if (data.state === 'manual_token_required') {
+        // Claude CLI no longer prints the OAuth URL, so the page cannot host the
+        // browser login. Hand over to the manual token field instead of waiting.
+        if (claudeAuthWindow) claudeAuthWindow.close();
+        claudeAuthWindow = null;
+        claudeResult.className = '';
+        claudeResult.textContent = 'この画面からはブラウザ認証を続けられません。手動トークン入力へ切り替えてください。';
+        claudeResult.style.display = 'block';
+        showManualHint(data.message);
+        claudeBtn.disabled = false;
+        claudeCancelBtn.style.display = 'none';
+        claudeCodeSubmit.disabled = false;
+        clearInterval(statusTimer);
       } else if (data.state === 'verifying') {
         claudeBtn.disabled = true;
         claudeCancelBtn.style.display = 'inline-block';
         claudeResult.style.display = 'block';
         claudeResult.textContent = '認証結果を検証中...';
       } else if (data.state === 'success') {
+        hideManualHint();
         claudeResult.className = 'ok';
         claudeResult.textContent = 'Claudeの再認証を適用しました。';
         claudeBtn.disabled = false;
@@ -223,6 +273,7 @@ export function renderPage(): string {
       } else if (data.state === 'error') {
         if (claudeAuthWindow) claudeAuthWindow.close();
         claudeAuthWindow = null;
+        hideAuthLink();
         claudeResult.className = 'err';
         claudeResult.textContent = data.message || 'Claudeの再認証に失敗しました。';
         claudeBtn.disabled = false;
@@ -242,8 +293,8 @@ export function renderPage(): string {
     claudeAuthWindow = window.open('about:blank', '_blank');
     claudeBtn.disabled = true;
     claudeCodeSubmit.disabled = false;
-    claudeAuthLink.href = '#';
-    claudeAuthLink.style.display = 'none';
+    hideAuthLink();
+    hideManualHint();
     claudeResult.className = '';
     claudeResult.style.display = 'block';
     claudeResult.textContent = 'Claude認証を開始しています...';
@@ -281,7 +332,8 @@ export function renderPage(): string {
       claudeAuthWindow = null;
       claudeCodeInput.value = '';
       claudeCodeArea.style.display = 'none';
-      claudeAuthLink.style.display = 'none';
+      hideAuthLink();
+      hideManualHint();
       claudeResult.style.display = 'none';
       claudeResult.className = '';
       claudeBtn.disabled = false;
