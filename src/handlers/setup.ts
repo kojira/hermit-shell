@@ -22,13 +22,19 @@ const claudeSetupTokenFlow = new ClaudeSetupTokenFlow({
   resetClient,
 });
 
+/** tailnet (CGNAT) を既定の許可範囲にする。 */
+export const DEFAULT_SETUP_ALLOW_CIDR = "100.64.0.0/10";
+
 /**
- * リクエスト元が loopback かどうかを、ソケットの実接続元アドレスだけで判定する。
- * X-Forwarded-For / req.ip は詐称できるので信用しない（サーバは全インターフェースで
- * listen しているため、この判定が設定ページの唯一の防壁になる）。
+ * 設定ページへの接続を許可する CIDR。HERMIT_SETUP_ALLOW_CIDR で上書きできる。
+ * IPv4 の CIDR のみを解釈し、それ以外（IPv6 など）は拒否側に倒す。
  */
-function isLoopback(req: Request): boolean {
-  const addr = req.socket.remoteAddress || "";
+export function setupAllowCidr(): string {
+  const raw = process.env.HERMIT_SETUP_ALLOW_CIDR;
+  return raw && raw.trim() ? raw.trim() : DEFAULT_SETUP_ALLOW_CIDR;
+}
+
+function isLoopbackAddr(addr: string): boolean {
   return (
     addr === "127.0.0.1" ||
     addr === "::1" ||
@@ -37,8 +43,57 @@ function isLoopback(req: Request): boolean {
   );
 }
 
+/** "a.b.c.d" を 32bit 整数へ。IPv4 でなければ null。 */
+function ipv4ToInt(addr: string): number | null {
+  const parts = addr.split(".");
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const octet = Number(part);
+    if (octet > 255) return null;
+    value = (value << 8) | octet;
+  }
+  return value >>> 0;
+}
+
+/** IPv4-mapped IPv6 (::ffff:a.b.c.d) は IPv4 として扱う。 */
+function normalizePeerAddress(addr: string): string {
+  const prefix = "::ffff:";
+  return addr.startsWith(prefix) ? addr.slice(prefix.length) : addr;
+}
+
+export function isAddressInCidr(addr: string, cidr: string): boolean {
+  const [network, prefixRaw] = cidr.split("/");
+  if (prefixRaw === undefined) return false;
+  if (!/^\d{1,2}$/.test(prefixRaw)) return false;
+  const prefix = Number(prefixRaw);
+  if (prefix > 32) return false;
+  const ip = ipv4ToInt(normalizePeerAddress(addr));
+  const base = ipv4ToInt(network);
+  if (ip === null || base === null) return false;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return (ip & mask) === (base & mask);
+}
+
+/**
+ * リクエスト元が設定ページを開けるかを、ソケットの実接続元アドレスだけで判定する。
+ * X-Forwarded-For / req.ip は詐称できるので信用しない。
+ *
+ * loopback は常に許可（ローカル復旧経路を壊さない）。非 loopback は
+ * HERMIT_SETUP_ALLOW_CIDR（既定 100.64.0.0/10 = tailnet）内だけ許可する。
+ * この範囲は tailnet の信頼境界そのもので、SSH 鍵も同じ端末群にあるため、
+ * 範囲内のピアはホスト侵害と同等とみなす（README の tradeoff を参照）。
+ */
+export function isSetupRequestAllowed(req: Request): boolean {
+  const addr = req.socket.remoteAddress || "";
+  if (isLoopbackAddr(addr)) return true;
+  return isAddressInCidr(addr, setupAllowCidr());
+}
+
 function denyRemote(res: Response): void {
-  res.status(403).json({ error: "forbidden: localhost only" });
+  // CIDR 外かどうか・コードの正誤などは明かさない。
+  res.status(403).json({ error: "forbidden" });
 }
 
 /** 現在の認証状態（マスク済み）と最後にファイルへ適用した時刻を返す。 */
@@ -314,12 +369,12 @@ export function renderPage(): string {
 }
 
 export function handleSetupPage(req: Request, res: Response): void {
-  if (!isLoopback(req)) return denyRemote(res);
+  if (!isSetupRequestAllowed(req)) return denyRemote(res);
   res.status(200).type("html").send(renderPage());
 }
 
 export function handleClaudeSetupTokenStart(req: Request, res: Response): void {
-  if (!isLoopback(req)) return denyRemote(res);
+  if (!isSetupRequestAllowed(req)) return denyRemote(res);
 
   const started = claudeSetupTokenFlow.start();
   if (!started.started) {
@@ -335,7 +390,7 @@ export function handleClaudeSetupTokenStart(req: Request, res: Response): void {
 }
 
 export function handleClaudeSetupTokenStatus(req: Request, res: Response): void {
-  if (!isLoopback(req)) return denyRemote(res);
+  if (!isSetupRequestAllowed(req)) return denyRemote(res);
   res
     .status(200)
     .set("Cache-Control", "no-store")
@@ -343,13 +398,13 @@ export function handleClaudeSetupTokenStatus(req: Request, res: Response): void 
 }
 
 export function handleClaudeSetupTokenCancel(req: Request, res: Response): void {
-  if (!isLoopback(req)) return denyRemote(res);
+  if (!isSetupRequestAllowed(req)) return denyRemote(res);
   const result = claudeSetupTokenFlow.cancel();
   res.status(200).json({ state: "idle", ...result });
 }
 
 export function handleClaudeSetupTokenCode(req: Request, res: Response): void {
-  if (!isLoopback(req)) return denyRemote(res);
+  if (!isSetupRequestAllowed(req)) return denyRemote(res);
 
   const code = (req.body && (req.body as any).code) as unknown;
   if (typeof code !== "string") {
@@ -369,7 +424,7 @@ export async function handleSetupToken(
   req: Request,
   res: Response
 ): Promise<void> {
-  if (!isLoopback(req)) return denyRemote(res);
+  if (!isSetupRequestAllowed(req)) return denyRemote(res);
 
   const token = (req.body && (req.body as any).token) as unknown;
   if (typeof token !== "string" || !looksLikeToken(token)) {
