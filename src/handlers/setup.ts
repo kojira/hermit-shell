@@ -159,7 +159,7 @@ export function renderPage(): string {
   <h2>契約の優先切替</h2>
   <p id="account-status">構成を読み込み中...</p>
   <ol id="accounts"></ol>
-  <button id="import-account">現在の単一Bearerを取り込む</button>
+  <button id="import-account">現在の契約を一覧に追加</button>
   <button id="enable-pool">優先切替を有効にする</button>
   <button id="disable-pool">従来の単一認証へ戻す</button>
   <p id="account-result" role="status"></p>
