@@ -5,7 +5,7 @@
 - 対象: `kojira/hermit-shell`、調査基点 `ed081e0ee68bd1731050d41a5507329ae90fd828`。
 - 正本: 専用ブランチ `design/D-HERMIT-001` の本書。Issue/PRは本書への参照のみを持つ。
 - 今回の成果: ソース調査と具体設計。変更は本書のみ。本番、認証ファイル、トークン、CLIログイン、推論APIにはアクセスしていない。
-- 承認単位: 以下のUX・データ所有権・切替条件・制約を一体で承認する。提供元の利用条件の確認は別の着手ゲート（§11）。
+- 承認単位: 以下のUX・データ所有権・切替条件・制約を一体で承認する。設計承認と実装指示によるoffline実装の開始と、提供元の利用条件を踏まえた実資格情報の利用・実推論・配備の判断は分離する（§11）。
 
 ## 1. 目的・非対象
 
@@ -107,7 +107,7 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 - 起動時にversion、型、ID/名前/secret重複を検証。登録数3などの固定上限は置かない。ファイルが存在して壊れていたら**pool設定エラー**としてchatを503にし、旧envへfallbackしない。`/health`は生存確認のまま、`/setup`で修復/rollback手順を表示。
 - 構成mutationは単一プロセス内で直列化。`expectedRevision`不一致は409。検証中はロックを持たず、開始時のrevisionと対象generationを記録し、検証後に比較してからcommitする。検証中のdelete/replace/reorderに負けた試行は409、適用しない。
 - cooldown/認証エラー観測の更新は構成revisionを増やさず、現在の(id,generation)へmergeする。古いgenerationの完了は新しい認証へ一切反映しない。過去に送信済みの成功が、後から観測したexhausted/auth_requiredを解除してはいけない。解除できるのはその状態のrevisionを取得した回復probe成功だけ。
-- exhausted/retryAt/auth_requiredは再起動後も保持。probe中/in-flight/client/一時レート制限gateはメモリーのみ。起動後、期限経過したexhaustedは「次の通常要求で回復確認」に戻す。
+- exhausted/retryAt/auth_requiredは再起動後も保持。probe中/in-flight/clientはメモリーのみ。起動後、期限経過したexhaustedは「次の通常要求で回復確認」に戻す。
 - 観測の保存に失敗したら、そのプロセス内は拒否状態を保持し再使用を避ける（メモリーを旧readyへ戻さない）。setupに保存失敗を出し、ログには安全なエラー分類だけ。再起動で冷却が失われ得ることを明示。構成変更の成功としては報告しない。
 
 ### 4.2 従来との優先関係
@@ -137,7 +137,7 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 |---|---|---|
 | 枠拒否が確定、まだ上流を開いていない | 可、未試行の次順位だけ | 当該契約をexhausted。§5.3の期限まで選ばない |
 | 同じ枠拒否、既に上流を開いた/出力した | **不可** | 当該契約をexhaustedにして次の別要求から切替 |
-| その他429/構造化rate_limit_error | **不可**、従来の429型を即返却 | pool全体の一時gate。Retry-Afterが有効ならその時刻、なければ30秒。別契約へ回して短時間制限を回避しない。UIは「一時制限/種別未確定」で、枠切れとは呼ばない |
+| その他429/構造化rate_limit_error | **不可**、従来の429型と有効なRetry-Afterを即返却 | exhausted認定も、新たな契約単位/pool全体のgateも行わない。後続の独立要求は通常の優先選択に従う。UIは「一時制限/種別未確定」で、枠切れとは呼ばない |
 | HTTP401/構造化authentication_error | 不可 | 当該契約をauth_required。次の独立した要求は他のready契約を選べる。本人の再認証成功まで元へ戻さない |
 | 403 permission_error | 不可 | 資源/modelの権限かもしれないため契約全体を無効化しない。要求を終え、setupに権限エラーを表示 |
 | 400/404/413等の要求不正 | 不可 | pool状態を変更しない |
@@ -152,7 +152,7 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 - 既存`rateLimitRetryAfter()`の厳密なdelta-seconds/HTTP-date検証を共有し、安全な時刻へ変換。期限が過去なら0秒として扱い、数値overflowは無効。reset候補とRetry-Afterの双方が有効なら**遅い方**。標準APIのrequests/tokens-resetは使用しない。
 - provider期限無し/期限到達直後に再拒否なら、初回15分、再失敗30分、以降60分のローカルprobe間隔。Retry-After等がより遅ければ尊重する。これは「復旧予定」ではなく「次回確認可能時刻」と表示。期限が即時なら最低1秒を置いてloopを防ぐ。
 - 期限到達で勝手にreadyへ戻さず、**次の通常ユーザー要求1件**だけをsingle-flight probeとしてその契約へ送る。background推論/usage pollingはゼロ。他の同時要求はprobe中をskipして次順位を利用、候補が無ければ503 busy。probe成功でready、失敗なら分類に従い再冷却/認証待ち。元の高順位が回復したら後続の要求から優先へ戻す。
-- 枠拒否のprobeがnetwork/403等で終わる場合は従来のexhaustedを保持し、次回ローカルprobe時刻を設定して連続probeを防ぐ。曖昧429はexhaustedを解除せず、全体一時gateも設定する。
+- 枠拒否のprobeがnetwork/403等で終わる場合は従来のexhaustedを保持し、次回ローカルprobe時刻を設定して連続probeを防ぐ。曖昧429も既存のexhaustedを解除せず、当該契約の次回ローカルprobe時刻を設定するが、他契約を停止しない。
 - ready状態の同時成功が古い枠拒否を打ち消さない。これは状態generation/観測revisionの比較で保証する。
 
 ## 6. 上流送信・並行性・出力開始の境界
@@ -165,17 +165,17 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 4. `handleChatCompletions`からrequest-builder callbackを渡し、attemptのauthと対応する`convertRequest`/`buildAnthropicRequestWithTools`を呼ぶ。変換済み内容は同じbody/model/cache_controlを維持。clientとsystem blockが同じ認証から作られたことをassertする。
 5. `streamMessage`の上流`messages.create({stream:true})`を共通実行seamとし、成功時の`accumulateMessage`を再利用。clientを引数注入し、poolでは共有getClientを呼ばない。
 6. **保守的なcommit点は上流HTTP200のstream取得成功時**。既存onOpenの直前に`upstreamOpened=true`とし、以後はstream/nonstream/toolsいずれも再送不可。nonstreamでまだ下流に1byteも出していなくても、上流を開いていたら再送しない。これによりtool/thinkingを含む受信済み生成を重複しない。HTTP200直後のSSE枠エラーも次の要求にしか切り替えられない制約をUI/READMEに記す。
-7. pre-openの枠拒否だけcatchして状態更新、次の未試行IDへ。**1入力要求あたり上流送信は適格snapshot件数N以下、各ID最大1回、同時送信1、待機sleepなし、SDK再試行0**。候補を使い切るか共通期限に達したら終了する。3件というretry capや固定回数loopは置かない。retry budgetを各helperに二重実装しない。
-8. pool全体で同時実行中のchat要求は最大**8**、待ち行列なし（9件目は503 busy＋Retry-After:1）。通常は優先1へ同時要求が集中してよく、空いている契約へ負荷をばらまかない。probeのsingle-flightだけ例外。同時上流は最大8。8要求の累積送信数はそれぞれの適格snapshot件数の合計以下（同じNなら8N以下）であり、登録数に依存する。セットアップ検証は別枠で全体1件のみ。
-9. poolのpre-open試行群は合計30秒、要求全体は最大10分（streamも含む）。期限時はabortして504、再送しない。cooldownを要求内で待たない。予算は全attempt共通。legacyの期限は変えない。外部host failoverの実際のtimeout値は調査していないため、本設計から変更しない。
+7. pre-openの枠拒否だけcatchして状態更新、次の未試行IDへ。**1入力要求あたり上流送信は適格snapshot件数N以下、各ID最大1回、同時送信1、待機sleepなし、SDK再試行0**。候補を使い切ったら終了する。3件というretry capや固定回数loopは置かない。retry budgetを各helperに二重実装しない。
+8. chat要求のグローバル同時数上限・待ち行列は新設しない。通常は優先1へ同時要求が集中してよく、空いている契約へ負荷をばらまかない。各要求内の逐次attemptとprobeのsingle-flightを維持し、probe中で他に候補が無い場合だけ503 busyとする。セットアップ検証は別枠で全体1件のみ。
+9. chatにはpre-open試行群や要求全体の共通打切り期限を新設せず、既存SDKのtimeout挙動と切断abortを維持する。timeout時は504、再送しない。cooldownを要求内で待たない。有限性は§6.7の適格snapshot件数N以下・各ID最大1回で保証する。外部host failoverの実際のtimeout値は調査していないため、本設計から変更しない。
 10. `res.close`のabortはpoolのnonstreamにも適用。SSE前/後を問わずabort、finallyでlease/probe lockを必ず解放。切断後は次のattemptを出さない。予約後deleteされた送信済み要求は最後まで続け、完了時の観測は削除済み/旧generationには書き戻さない。
 
 ## 7. HTTP/SSE契約と秘密情報
 
 - `/health`, `/v1/models`, Bonsai、正常なOpenAI応答/tool_calls/usage/[DONE]は変更しない。
-- poolで上流未openのまま全候補がexhaustedならHTTP429、既存`rateLimitErrorBody()`のtype=`rate_limit_error`, code=`rate_limit_exceeded`を維持し、追加`reason=all_accounts_exhausted`。Retry-Afterは最も早い次回probe可能時刻までの切上げ秒。全体一時gate中もHTTP429だが従来bodyを保ち、枠全滅と表示しない。
+- poolで上流未openのまま全候補がexhaustedならHTTP429、既存`rateLimitErrorBody()`のtype=`rate_limit_error`, code=`rate_limit_exceeded`を維持し、追加`reason=all_accounts_exhausted`。Retry-Afterは最も早い次回probe可能時刻までの切上げ秒。曖昧429は当該要求だけ従来bodyと有効なRetry-Afterを即返却し、枠全滅と表示せず後続要求をgateしない。
 - 無設定、全auth_required、または枠拒否とauth_requiredの混在で使えるものが無い場合はHTTP503、type=`api_error`, code=`credentials_unavailable`。ID/名前/token/生provider messageを返さない。空候補でも制御が有限に終わる。
-- probe中/同時数上限は503 `credential_pool_busy`、Retry-After:1。構成破損は503 `credential_config_error`。network/529/5xxは503 `upstream_unavailable`、timeoutは504 `upstream_timeout`。poolの401は503 `upstream_authentication_error`（client自身の認証エラーにしない）。403/400等は同じstatusの安全な固定文言。legacyは現在のHTTP/SSE契約を維持する。
+- probe中で他に候補が無い場合は503 `credential_pool_busy`、Retry-After:1。構成破損は503 `credential_config_error`。network/529/5xxは503 `upstream_unavailable`、timeoutは504 `upstream_timeout`。poolの401は503 `upstream_authentication_error`（client自身の認証エラーにしない）。403/400等は同じstatusの安全な固定文言。legacyは現在のHTTP/SSE契約を維持する。
 - **poolのstream要求でもpre-openエラーは実HTTP error＋JSON**。現在の非429でHTTP200 SSEを返す挙動はlegacyに限定して保持。これで外側host failoverがpoolのpre-open障害を検出できる。
 - open後はHTTP statusを変えずSSE `{error: {message: 固定文言, type, code, status}}`を1回、`[DONE]`を1回、end。成功finish、usage、完成tool_callsを追加しない。nonstreamの上流途中失敗はエラーJSONのみ、部分成功を返さない。
 - logは`id`（ランダム内部ID）、generation、分類、HTTP status、attempt番号、時刻だけのallowlist。token、認証コード、Authorization、OAuth URL query、request body、SDK error全体やprovider error.messageを出さない。pool用のcatchで既存`console.error(error)`へraw errorが流れないようにする。SDK loggerも無効にし、invalid SSEを含め秘密文字列が出ないテストを行う。legacy全般のlogging修正へ拡大しない。
@@ -187,7 +187,7 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 
 | 操作 | 入力 | 成功/失敗 |
 |---|---|---|
-| `GET /setup/accounts`（追加） | なし | 200 `{revision,mode,effectiveAuth,accounts:AccountView[],transientRetryAt}`。secret無し |
+| `GET /setup/accounts`（追加） | なし | 200 `{revision,mode,effectiveAuth,accounts:AccountView[]}`。secret無し |
 | `POST /setup/accounts`（追加） | JSON `{action,expectedRevision,...}`。action=`import_legacy`（name）/`rename`（id,name）/`reorder`（orderedIds）/`delete`（id）/`set_mode`（mode） | 200 新view、不正400、競合409、保存失敗503。reorderは現存ID集合と完全一致。pool有効化はAPI_KEYあり409、0件400。legacy復帰は元のenv認証源と警告を確認して明示実行 |
 | `POST /setup/token`（拡張） | legacyの`{token}`はmode=legacy時のみ維持。pool対象は`{token,expectedRevision,target:{kind:add,name}|{kind:replace,id,generation}}` | 成功200 view、重複/競合409。検証失敗は401/403/429/503を区別し固定文言、Retry-Afterは有効な場合だけ。曖昧なtarget無しpool操作は409で拒否 |
 | `POST /setup/claude/start`（拡張） | 上と同じtarget/expectedRevision、token無し。legacyは従来の意味 | 202 `{attemptId,targetId?,state}`。singleton進行中409。addは試行内部でIDを予約するが検証成功までstoreに追加しない |
@@ -206,7 +206,7 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 | `src/handlers/setup.ts`, `src/server.ts` | `/setup`一覧/対象選択、上記API、統一validation/store commit。別管理画面を作らない |
 | `src/utils/setup_token_flow.ts` | 対象/attempt binding、cancel/verify競合ガード。公式CLIやfallback UXは再利用 |
 | `src/utils/rate_limit.ts` | 根拠付き限定分類、共通Retry-After解釈。429という文字列判定は禁止 |
-| `src/utils/account_router.ts`（新規） | 優先選択、bounded attempts、lease、probe、期限。汎用LB/設定プラグインにはしない |
+| `src/utils/account_router.ts`（新規） | 優先選択、bounded attempts、要求単位のlease、probe、abort。汎用LB/設定プラグインにはしない |
 | `src/handlers/chat.ts` | 4経路の`streamMessage`へ明示client/attempt実行を注入。mode境界、pre-open HTTPとterminal SSE、pool safe logging |
 | `src/index.ts`, `.gitignore`, `README.md` | 有効認証源名、秘密ファイルignore、現行auth記述の本件に必要な訂正/操作/限界/rollback |
 
@@ -214,7 +214,7 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 
 ## 10. 条項と受入チェックリスト（未実行）
 
-以下は実装時の一対一のRED→minimal GREEN→保持証拠。**本調査でテストを追加・実行済みという意味ではない**。独立レビュー欄は全て未実施。source-named testと既存HTTP harnessを使い、外部通信をlocalhost以外拒否してfake tokensだけ使う。
+以下は実装時の一対一のRED→minimal GREEN→保持証拠。**本調査でテストを追加・実行済みという意味ではない**。表の独立レビュー欄は実装の検証を対象とし、全て未実施。設計のみの独立レビュー結果と修正対応は§10.1に記録する。source-named testと既存HTTP harnessを使い、外部通信をlocalhost以外拒否してfake tokensだけ使う。
 
 | ID/設計条項 | production seam / assertion-level RED | minimal GREEN / 保持する証拠 | 禁止・後続影響 / 独立レビュー |
 |---|---|---|---|
@@ -222,10 +222,10 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 | A2 §4 正本と保存 | `accounts.test.ts`（新規）: 0600、再起動再読込、壊れたfileでenvfallback無し、rename失敗で変更未適用 | atomic store。temp fixture directory、モード/内容のassert結果 | 実認証ファイルを使わない。rollbackの前提 / 未実施 |
 | A3 §3/8 lifecycle | `setup_token_flow.test.ts`拡張: Aのverify中cancel→B開始→A完了でBもAも誤適用しない。delete/reorder競合409 | attempt/revision guard、singleton検証。deferred PromiseのHTTP/flow証拠 | 旧成功で新資格情報上書き禁止。A2と連携 / 未実施 |
 | A4 §5/6 枠切替4経路 | `chat.accounts.test.ts`（新規）: stream/nonstream×tools有無。登録数1/2/4で、順次429＋認識ヘッダー→末尾成功（4件時は4番目へ到達）。全拒否なら送信N回のみ、全体429。冷却中/削除済みはskip、途中追加は試さず各ID最大1回 | shared router/streamMessage。上流送信先順、auth header、model/body、SSE/JSONのassert | SDK hidden retry、API key混入、env書換禁止。A5へ / 未実施 |
-| A5 §5 分類境界 | `rate_limit.test.ts`（新規）＋実HTTP: ヘッダー無し429、unknown claim、warning、overageだけ、文中429、401/403/529/networkで別契約へ再送しない | allowlist classifier。公式/issue由来とsyntheticをfixtureコメントで区別 | 429全件枠認定/架空header禁止。利用条件確認を代替しない / 未実施 |
+| A5 §5 分類境界 | `rate_limit.test.ts`（新規）＋実HTTP: ヘッダー無し429、unknown claim、warning、overageだけ、文中429、401/403/529/networkで別契約へ再送しない。曖昧429は即返却し、exhausted認定も後続独立要求へのgateも追加しない | allowlist classifier。公式/issue由来とsyntheticをfixtureコメントで区別 | 429全件枠認定/架空header禁止。利用条件確認を代替しない / 未実施 |
 | A6 §5.3 回復 | `chat.accounts.test.ts`: fake clockでreset/Retry-After/未知resetの15→30→60分。期限前0送信、期限後同時要求でもprobe1件、高順位復帰 | 持続cooldown＋観測revision。restart/旧成功との競合assert | background推論禁止、provider resetとlocal probe表示分離 / 未実施 |
 | A7 §6/7 出力境界 | 実HTTP上流200直後error、text/tool/thinking後error、nonstream途中error、切断前後でattempt数1。SSE errorとDONE各1、成功finish/usageなし | upstream-open latch、terminal formatter、abort | 200後の再送禁止。既存message_accumulatorを重複させない / 未実施 |
-| A8 §6 並行/期限 | 同時9要求で上流最大8、9件目503。30秒pre-open/10分全体期限、SDK maxRetries0、delete中/replace中のold-generation結果は無効 | global leases＋deadline＋finally。上流接続数/abort/試行数のassert | キュー/hedging/無限retry禁止。legacy retryへ影響させない / 未実施 |
+| A8 §6 並行/abort/有限試行 | 並行要求でも各要求は逐次N回以下、SDK maxRetries0。probe single-flight、切断後は次attempt無し、delete中/replace中のold-generation結果は無効。既存SDK timeout/abortを維持し、新しい同時数上限・chat共通期限を追加しない | 要求単位のlease＋probe lock＋finally。上流送信順/abort/試行数/観測状態のassert | キュー/hedging/無限retry禁止。legacy retryへ影響させない / 未実施 |
 | A9 §7/8 非漏洩/権限 | `setup.access.test.ts`拡張＋poolログcapture: 全routeでCIDR外403、Origin不一致403、form415、秘密canary入りprovider error/invalid SSEもDOM/JSON/logに無し | 共通peer guard/public projection/safe logger | tokenをmaskで返す新API禁止。OAuth URLは既存認証中の公式リンクに限る / 未実施 |
 | A10 §4.2/7 互換 | 既存`chat.rate-limit.test.ts`、convert/tools/usage tests。file無しでenv順位/429即時/503 SDK retry/SSE非429互換、Bonsai素通し | 明確なlegacy/pool分岐。既存assertの保持、pool pre-open503を外側fixture clientが観測 | 既存host設定へ手を出さない。実ホストfailoverは未検証と報告 / 未実施 |
 | A11 §7 全不可 | 全exhausted→429＋最短Retry-After、全auth/混在/空→503、probe中503、名前漏れなし | 即時集約エラー。HTTP status/body/上流送信0の証拠 | `/health`を契約枠でdownにしない / 未実施 |
@@ -233,13 +233,26 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 
 RED失敗ログとGREEN成功ログは分けて保持する。CIの成功は実契約受入や配備承認を意味しない。既存CIの`pnpm test`およびNode launcher checkを、実装candidateで規約どおり通す。設計のみの本PRにruntime testsを増やさない。
 
+### 10.1 設計のみの独立レビューと修正記録
+
+初版commit `8a3e478` に対する独立レビュー（artifact: `5480b444-76b4-4012-9c2c-364f25ccd965/hermit-multi-account-design-review.md`）は**設計のみ**を対象とし、判定はBLOCK（以下4件のP1）。監督が採用した最小修正を本改訂へ反映した。可変長リスト、既存seamの再利用、HTTP200後の再送禁止、generation/revisionとprobeの所有権は妥当との評価を維持する。
+
+| 独立レビュー指摘 | 本改訂の対応箇所・内容 |
+|---|---|
+| 1: 曖昧429によるpool全体停止は未根拠 | §4.1/5.2/5.3/7/8/A5: 全体gateと公開フィールドを削除。当該要求の即時エラーのみとし、既にexhaustedのprobe回復規則は保持 |
+| 2: 新設グローバル同時数制限は未根拠 | §6.8/7/A8/11.3: 容量制限とそのbusy条件・テストを削除。要求内逐次attemptとprobe single-flightは保持 |
+| 3: 新設chat共通期限は未根拠 | §6.7–9/9/A8/11.3: 共通打切りを削除。既存SDK timeout/abortとN以下の試行上限は保持。§8のsetup検証期限は別用途であり変更しない |
+| 4: 利用条件の警告とoffline実装禁止の混同 | 冒頭/§11.1/11.3: offline実装承認と実資格情報利用・実推論・配備の判断を分離。利用許諾を認定するものではない |
+
+修正後の独立再レビューは未実施。本記録は実装証拠でも実装承認でもなく、A1–A12のRED/GREEN・実装独立レビュー・実契約受入はすべて未実施。独立レビューは外部Issue/公式資料/SDK外部ソースの内容自体を再取得しておらず、実契約の枠拒否検出成功も未検証である。
+
 ## 11. 導入・rollback・承認ゲート
 
 ### 11.1 利用条件と未確認事項
 
 [公式Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)は、OAuthが通常のClaude Code/Anthropic native apps向けであり、第三者開発者による自アプリへのClaude.ai login提供、ユーザーのFree/Pro/Max/Ultra資格情報によるリクエスト仲介、資格情報/session tokenの収集・保存・仲介を認めない旨を記している。本方式は公式CLIを通常の推論経路として実行する構成ではなく、取得tokenをproxyからMessages APIへ送る既存方式の拡張である。**技術的に動くことは利用許諾の証拠にならない**。
 
-本書から個人の具体契約への法的適否を断定しない。しかし「既存で動いている」「3件とも自分名義」だけで許可済みとも扱わない。利用者側でこの用途の提供元許諾/適用条件を確認することを、実装着手の明示ゲートにする。許可されない場合は本案を実装せず、正式に許可される認証/製品経路へ別設計で戻す（API課金へ黙って変更しない）。
+本書から個人の具体契約への法的適否を断定しない。しかし「既存で動いている」「3件とも自分名義」だけで許可済みとも扱わない。利用者側でこの用途の提供元許諾/適用条件を確認する判断は、実資格情報の利用・実推論・配備の前に行う。fake tokenとlocalhost fixtureによるoffline実装は、設計承認と実装指示によって開始でき、この確認とは分離する。これは本方式が利用条件上許可されるとの認定ではない。許可されない場合は実資格情報を使った本案の運用へ進まず、正式に許可される認証/製品経路へ別設計で戻す（API課金へ黙って変更しない）。
 
 未確認として残るもの:
 
@@ -257,8 +270,8 @@ RED失敗ログとGREEN成功ログは分けて保持する。CIの成功は実�
 
 ### 11.3 利用者へ求める判断（実装者へ持ち越さない）
 
-1. **D-HERMIT-001本文を承認するか**: `/setup`で可変長の契約リスト（現在3件、1/2/4件以上も可能）、優先順、枠拒否だけ自動切替、曖昧429は即返却、HTTP200後は再送なし、pool同時8件/30秒pre-open/10分全体、回復probe間隔、legacy rollbackという一案。
-2. **このサブスク資格情報利用方法の許諾・適用条件を確認できるか**。確認できるまでは実装開始不可。これは実装や配備の同意とは別。
+1. **D-HERMIT-001本文を承認しoffline実装を開始するか**: `/setup`で可変長の契約リスト（現在3件、1/2/4件以上も可能）、優先順、枠拒否だけ自動切替、曖昧429は当該要求へ即返却して全体停止なし、HTTP200後は再送なし、各要求N以下の逐次試行、既存SDK timeout/abort維持、回復probe間隔、legacy rollbackという一案。新たなchat同時数上限・共通打切り期限は設けない。
+2. **実資格情報を使う前に、このサブスク資格情報利用方法の許諾・適用条件を確認する**。実資格情報の利用・実推論・配備は別途判断・認可を要し、1のoffline実装承認に含めない。利用条件上の許可を本設計が認定するものではない。
 3. 承認後の初回登録時に、本人が別々の3契約の表示名/優先順位を入力し、公式画面でそれぞれログインする。秘密をDiscord/Issueへ送る必要はない。名前やtokenの事前収集は不要。
 
-1と2が満たされた後の文脈上明確なOKは、設計承認と実装開始指示として扱う。同じ実装承認を再度求めない。ただしmain merge/配備/本番実推論の承認を兼ねない。独立レビューの結果は本書のチェックリストへ記録し、未承認の仕様追加は行わない。
+1への文脈上明確なOKは、設計承認とoffline実装開始指示として扱う。同じ実装承認を再度求めない。ただし実資格情報の利用/main merge/配備/本番実推論の承認を兼ねず、2の利用条件判断も代替しない。独立レビューの結果は本書のチェックリストへ記録し、未承認の仕様追加は行わない。
