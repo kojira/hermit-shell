@@ -212,7 +212,7 @@ export function renderPage(): string {
     api_key_has_priority: 'APIキーが優先されています。契約の自動切替は有効にできません。',
     credential_save_failed: '保存できませんでした。保存先の権限・空き容量を確認してください。',
     credential_config_error: '契約ファイルが破損しています。ファイルを退避し、再起動して復旧してください。',
-    legacy_bearer_unavailable: '取り込み可能な単一Bearerがありません。',
+    legacy_bearer_unavailable: '一覧に追加できる現在の契約がありません。',
     account_name_required: '追加する契約の名前を入力してください。',
     account_target_required: '追加・更新する契約を選択してください。'
   };
@@ -250,7 +250,7 @@ export function renderPage(): string {
     if (data.mode !== 'pool') option('legacy', '従来の契約の認証情報を更新');
     option('add', '新しい契約を追加');
     const list = document.getElementById('accounts'); list.replaceChildren();
-    const states = { unknown: '追加・更新後の接続成功は未確認（接続失敗を示すものではありません）', available: '利用可能', exhausted: '枠切れ', reauth: '再認証待ち', recovering: '回復確認中' };
+    const states = { unknown: '追加・更新後の接続は未確認', available: '利用可能', exhausted: '枠切れ', reauth: '再認証待ち', recovering: '回復確認中' };
     data.accounts.forEach((a, index) => {
       option(a.id, a.name + 'の認証情報を更新');
       const item = document.createElement('li');
