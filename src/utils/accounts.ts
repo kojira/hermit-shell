@@ -13,7 +13,7 @@ export type Observed = {
 export type Account = { id: string; name: string; generation: number; authToken: string; appliedAt: number; observed: Observed };
 type Config = { schemaVersion: 1; revision: number; mode: "legacy" | "pool"; accounts: Account[] };
 export type TokenTarget = { expectedRevision: number; id?: string; generation?: number; name?: string };
-export type Lease = { account: Account; observation: number; recovery: boolean };
+export type Lease = { account: Account; observation: number };
 export class AccountError extends Error {
   constructor(public status: number, public code: string) { super(code); }
 }
@@ -34,8 +34,7 @@ function validConfig(c: any): c is Config {
         !Number.isFinite(a.appliedAt) || !o || !["unknown", "available", "exhausted", "reauth"].includes(o.state) ||
         ![null, "session", "weekly", "unauthorized"].includes(o.reason) || ![null, "provider", "local_probe"].includes(o.retryBasis) ||
         !(o.retryAt === null || (Number.isSafeInteger(o.retryAt) && o.retryAt >= 0 && o.retryAt <= 8640000000000000)) ||
-        !Number.isSafeInteger(o.failureCount) || o.failureCount < 0 ||
-        (o.state === "exhausted" && (o.retryAt === null || o.retryBasis === null))) return false;
+        !Number.isSafeInteger(o.failureCount) || o.failureCount < 0) return false;
     ids.add(a.id); tokens.add(a.authToken); return true;
   });
 }
@@ -47,7 +46,6 @@ export class AccountStore {
   private broken = false;
   private saveFailed = false;
   private observations = new Map<string, number>();
-  private recovering = new Map<string, Lease>();
   constructor(readonly filePath: string) {
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -62,7 +60,7 @@ export class AccountStore {
     return { revision: this.config.revision, mode: this.config.mode,
       effectiveSource: this.broken ? "credential_config_error" : auth.method === "env-api-key" ? "env-api-key" : this.config.mode === "pool" ? "pool" : auth.method,
       configError: this.broken, observationSaveFailed: this.saveFailed,
-      accounts: this.config.accounts.map(({ authToken: _, ...a }) => ({ ...copy(a), credential: "登録済み", observed: { ...a.observed, state: this.recovering.has(a.id) ? "recovering" : a.observed.state } })) };
+      accounts: this.config.accounts.map(({ authToken: _, ...a }) => ({ ...copy(a), credential: "登録済み" })) };
   }
   private persist(next: Config) {
     const tmp = `${this.filePath}.tmp.${process.pid}`;
@@ -94,7 +92,7 @@ export class AccountStore {
       a.authToken = token; a.generation++; a.appliedAt = Date.now(); a.observed = initialObserved();
     } else next.accounts.push({ id: randomUUID(), name: target.name!.trim(), generation: 1, authToken: token, appliedAt: Date.now(), observed: initialObserved() });
     this.commit(next);
-    if (target.id) { this.recovering.delete(target.id); this.observations.delete(target.id); }
+    if (target.id) { this.observations.delete(target.id); }
   }
   mutate(input: any) {
     if (!input || typeof input !== "object") throw new AccountError(400, "invalid_action");
@@ -123,20 +121,17 @@ export class AccountStore {
       default: throw new AccountError(400, "invalid_action");
     }
     this.commit(next);
-    if (input.action === "delete") { this.recovering.delete(input.id); this.observations.delete(input.id); }
+    if (input.action === "delete") { this.observations.delete(input.id); }
   }
-  snapshot(now = Date.now()): string[] {
+  snapshot(): string[] {
     this.assertValid();
-    return this.config.accounts.filter(a => a.observed.state !== "reauth" && !this.recovering.has(a.id) && (a.observed.state !== "exhausted" || a.observed.retryAt! <= now)).map(a => a.id);
+    return this.config.accounts.filter(a => a.observed.state !== "reauth").map(a => a.id);
   }
-  acquire(id: string, now = Date.now()): Lease | undefined {
+  acquire(id: string): Lease | undefined {
     const a = this.config.accounts.find(a => a.id === id);
-    if (!a || a.observed.state === "reauth" || this.recovering.has(id) || (a.observed.state === "exhausted" && a.observed.retryAt! > now)) return;
-    const lease = { account: copy(a), observation: this.observations.get(id) ?? 0, recovery: a.observed.state === "exhausted" };
-    if (lease.recovery) this.recovering.set(id, lease);
-    return lease;
+    if (!a || a.observed.state === "reauth") return;
+    return { account: copy(a), observation: this.observations.get(id) ?? 0 };
   }
-  release(lease: Lease) { if (this.recovering.get(lease.account.id) === lease) this.recovering.delete(lease.account.id); }
   observe(lease: Lease, observed: Observed, success = false) {
     const a = this.config.accounts.find(a => a.id === lease.account.id && a.generation === lease.account.generation);
     if (!a || (success && (this.observations.get(a.id) ?? 0) !== lease.observation)) return;
@@ -148,8 +143,10 @@ export class AccountStore {
   unavailable(now = Date.now()): { status: number; code: string; retryAfter?: string } {
     this.assertValid();
     const accounts = this.config.accounts;
-    if (accounts.length && accounts.every(a => this.recovering.has(a.id))) return { status: 503, code: "credential_pool_busy", retryAfter: "1" };
-    if (accounts.length && accounts.every(a => a.observed.state === "exhausted")) return { status: 429, code: "all_accounts_exhausted", retryAfter: String(Math.max(1, Math.ceil((Math.min(...accounts.map(a => a.observed.retryAt!)) - now) / 1000))) };
+    if (accounts.length && accounts.every(a => a.observed.state === "exhausted")) {
+      const times = accounts.map(a => a.observed.retryAt).filter((time): time is number => time !== null);
+      return { status: 429, code: "all_accounts_exhausted", ...(times.length === accounts.length ? { retryAfter: String(Math.max(1, Math.ceil((Math.min(...times) - now) / 1000))) } : {}) };
+    }
     return { status: 503, code: "credentials_unavailable" };
   }
 }

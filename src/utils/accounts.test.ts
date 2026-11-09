@@ -20,7 +20,7 @@ test("AccountStore saves 0600, reloads observations and keeps secrets out of vie
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.equal(JSON.stringify(store.view()).includes("sk-ant"), false);
   assert.deepEqual(new AccountStore(file).view(), store.view());
-  assert.deepEqual(new AccountStore(file).snapshot(), []);
+  assert.deepEqual(new AccountStore(file).snapshot(), store.view().accounts.map(a => a.id));
 });
 test("AccountStore preserves prior configuration on save failure, but retains rejection in memory", t => {
   const { store, file } = fixture(t);
@@ -42,16 +42,15 @@ test("AccountStore rejects stale revisions, generations and invalid permutations
   assert.throws(() => store.mutate({ expectedRevision: 2, action: "reorder", ids: [] }), /invalid_order/);
   assert.equal(store.acquire(a.id)!.account.authToken, "sk-ant-oat-fake-two");
 });
-test("AccountStore old successes and replaced generations cannot clear newer rejection; recovery is exclusive", t => {
+test("AccountStore old successes and replaced generations cannot clear newer rejection; exhausted accounts remain eligible", t => {
   const { store } = fixture(t);
   const id = store.snapshot()[0], old = store.acquire(id)!, reject = store.acquire(id)!;
   store.observe(reject, { state: "exhausted", reason: "session", retryAt: 1, retryBasis: "local_probe", failureCount: 1 });
   store.succeed(old);
   assert.equal(store.view().accounts[0].observed.state, "exhausted");
-  const probe = store.acquire(id)!;
-  assert.equal(probe.recovery, true); assert.equal(store.acquire(id), undefined);
-  assert.equal(store.unavailable().code, "credential_pool_busy");
-  store.succeed(probe); store.release(probe);
+  const next = store.acquire(id)!;
+  assert.ok(store.acquire(id));
+  store.succeed(next);
   assert.equal(store.view().accounts[0].observed.state, "available");
   const stale = store.acquire(id)!;
   store.saveToken({ expectedRevision: 1, id, generation: 1 }, "sk-ant-oat-replacement");

@@ -27,7 +27,7 @@ test("router snapshots IDs, uses updated generation just before sending and excl
   }), PoolUnavailableError);
   assert.deepEqual(tokens, ["sk-ant-oat-first", "sk-ant-oat-updated"]);
   const next = await router.run(undefined, async (_client, token) => token);
-  assert.equal(next, "sk-ant-oat-added");
+  assert.equal(next, "sk-ant-oat-first");
 });
 test("router skips deleted unsent IDs and never retries after upstream opened", async t => {
   const { store, router } = fixture(t), ids = store.snapshot();
@@ -38,16 +38,15 @@ test("router skips deleted unsent IDs and never retries after upstream opened", 
   assert.equal(count, 1);
   assert.equal(store.view().accounts.length, 1);
 });
-test("ambiguous recovery preserves exhaustion with later probe and releases occupancy", async t => {
+test("ambiguous 429 preserves the last quota observation without switching", async t => {
   const { store, router } = fixture(t);
   const lease = store.acquire(store.snapshot()[0])!;
   store.observe(lease, { state: "exhausted", reason: "weekly", retryAt: 1, retryBasis: "provider", failureCount: 0 });
   let count = 0;
-  const before = Date.now();
+  const before = store.view().accounts[0].observed;
   await assert.rejects(router.run(undefined, async () => { count++; throw new APIError(429, {}, "fixture", new Headers()); }), APIError);
   const a = store.view().accounts[0];
-  assert.equal(a.observed.state, "exhausted"); assert.equal(a.observed.retryBasis, "local_probe");
-  assert.ok(a.observed.retryAt! >= before + 15 * 60000); assert.equal(count, 1);
+  assert.deepEqual(a.observed, before); assert.equal(count, 1);
 });
 test("all-reauth and mixed unavailable return 503, not all-exhausted 429", t => {
   const { store } = fixture(t), ids = store.snapshot();
