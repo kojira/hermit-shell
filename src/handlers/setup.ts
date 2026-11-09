@@ -156,15 +156,15 @@ export function renderPage(): string {
   <div class="muted">最終適用: ${lastSafe}</div>
 </div>
 <div class="card">
-  <h2>契約の優先切替</h2>
+  <h2>契約一覧と自動切替</h2>
   <p id="account-status">構成を読み込み中...</p>
   <ol id="accounts"></ol>
-  <button id="import-account">現在の単一Bearerを取り込む</button>
-  <button id="enable-pool">優先切替を有効にする</button>
-  <button id="disable-pool">従来の単一認証へ戻す</button>
+  <button id="import-account">現在の契約を一覧に追加</button>
+  <button id="enable-pool">一覧の順に自動で切り替える</button>
+  <button id="disable-pool">自動切替をやめて従来の契約を使う</button>
   <p id="account-result" role="status"></p>
   <label for="account-target">追加・更新先（下のブラウザ認証／手動入力で共通）</label>
-  <select id="account-target"><option value="legacy">従来の単一認証を更新</option><option value="add">新しい契約を追加</option></select>
+  <select id="account-target"><option value="legacy">従来の契約の認証情報を更新</option><option value="add">新しい契約を追加</option></select>
   <input id="account-name" type="text" placeholder="追加する契約の名前">
   <p class="muted">検証要求は利用枠を消費する場合があります。検証成功時だけ保存します。元の単一認証は取り込み後も保持します。保存は新規要求から反映し、進行中の応答は続行します。</p>
 </div>
@@ -209,10 +209,10 @@ export function renderPage(): string {
     configuration_changed: '構成が変更されました。一覧を確認して再試行してください。',
     account_changed: '対象の契約が更新・削除されました。一覧を確認してください。',
     duplicate_token: 'このトークンは既に別の契約へ登録済みです。',
-    api_key_has_priority: '環境APIキーが優先されています。優先切替は有効にできません。',
+    api_key_has_priority: 'APIキーが優先されています。契約の自動切替は有効にできません。',
     credential_save_failed: '保存できませんでした。保存先の権限・空き容量を確認してください。',
     credential_config_error: '契約ファイルが破損しています。ファイルを退避し、再起動して復旧してください。',
-    legacy_bearer_unavailable: '取り込み可能な単一Bearerがありません。',
+    legacy_bearer_unavailable: '一覧に追加できる現在の契約がありません。',
     account_name_required: '追加する契約の名前を入力してください。',
     account_target_required: '追加・更新する契約を選択してください。'
   };
@@ -235,21 +235,28 @@ export function renderPage(): string {
     const data = await r.json();
     if (!r.ok) throw new Error(explain(data.error));
     accountView = data;
-    document.getElementById('account-status').textContent = '認証モード: ' + (data.mode === 'pool' ? '優先切替' : '従来の単一認証') + ' / 有効な認証源: ' + data.effectiveSource + (data.configError ? ' — 契約ファイルの設定エラー' : '') + (data.observationSaveFailed ? ' — 状態の保存に失敗。再起動すると未保存の冷却状態が失われる場合があります。' : '');
+    const usage = {
+      'env-auth-token': '現在は従来の契約を使用しています。契約の自動切替は無効です。',
+      pool: '契約の自動切替が有効です。一覧の上から順に、利用できる契約を使います。',
+      'env-api-key': '現在はAPIキーを使用しています。一覧の契約への自動切替は行いません。',
+      none: '認証情報が設定されていません。契約の自動切替は無効です。',
+      credential_config_error: '契約ファイルの設定エラーにより、契約を使用できません。'
+    };
+    document.getElementById('account-status').textContent = usage[data.effectiveSource] + (data.observationSaveFailed ? ' — 状態の保存に失敗。再起動すると未保存の冷却状態が失われる場合があります。' : '');
     document.getElementById('enable-pool').disabled = data.effectiveSource === 'env-api-key' || data.configError;
     const selected = targetSelect.value;
     targetSelect.replaceChildren();
     function option(value, text) { const o = document.createElement('option'); o.value = value; o.textContent = text; targetSelect.append(o); }
-    if (data.mode !== 'pool') option('legacy', '従来の単一認証を更新');
+    if (data.mode !== 'pool') option('legacy', '従来の契約の認証情報を更新');
     option('add', '新しい契約を追加');
     const list = document.getElementById('accounts'); list.replaceChildren();
-    const states = { unknown: '未確認', available: '利用可能', exhausted: '枠切れ', reauth: '再認証待ち', recovering: '回復確認中' };
+    const states = { unknown: '追加・更新後の接続は未確認', available: '利用可能', exhausted: '枠切れ', reauth: '再認証待ち', recovering: '回復確認中' };
     data.accounts.forEach((a, index) => {
-      option(a.id, a.name + 'を更新');
+      option(a.id, a.name + 'の認証情報を更新');
       const item = document.createElement('li');
-      item.textContent = a.name + ' — 登録済み / ' + states[a.observed.state] + (a.observed.retryAt ? ' / ' + (a.observed.retryBasis === 'provider' ? '次回利用可能時刻: ' : '次回確認可能時刻: ') + new Date(a.observed.retryAt).toLocaleString() : '');
+      item.textContent = a.name + ' — 一覧に追加済み / ' + states[a.observed.state] + (a.observed.retryAt ? ' / ' + (a.observed.retryBasis === 'provider' ? '次回利用可能時刻: ' : '次回確認可能時刻: ') + new Date(a.observed.retryAt).toLocaleString() : '');
       function button(text, action, disabled = false) { const b = document.createElement('button'); b.textContent = text; b.disabled = disabled; b.onclick = action; item.append(b); }
-      button('更新', () => { targetSelect.value = a.id; document.getElementById('token').focus(); });
+      button('認証情報を更新', () => { targetSelect.value = a.id; document.getElementById('token').focus(); });
       button('名前変更', () => { const name = prompt('契約の名前', a.name); if (name) mutateAccounts({ action: 'rename', id: a.id, name }); });
       for (const [label, delta] of [['↑', -1], ['↓', 1]]) button(label, () => { const ids = data.accounts.map(a => a.id); [ids[index], ids[index + delta]] = [ids[index + delta], ids[index]]; mutateAccounts({ action: 'reorder', ids }); }, index + delta < 0 || index + delta >= data.accounts.length);
       button('削除', () => { if (confirm(a.name + 'をこの一覧から削除します。提供元での失効ではありません。最後の1件を削除しても単一認証には戻りません。')) mutateAccounts({ action: 'delete', id: a.id }); });
