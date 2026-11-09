@@ -178,7 +178,7 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 - probe中で他に候補が無い場合は503 `credential_pool_busy`、Retry-After:1。構成破損は503 `credential_config_error`。network/529/5xxは503 `upstream_unavailable`、timeoutは504 `upstream_timeout`。poolの401は503 `upstream_authentication_error`（client自身の認証エラーにしない）。403/400等は同じstatusの安全な固定文言。legacyは現在のHTTP/SSE契約を維持する。
 - **poolのstream要求でもpre-openエラーは実HTTP error＋JSON**。現在の非429でHTTP200 SSEを返す挙動はlegacyに限定して保持。これで外側host failoverがpoolのpre-open障害を検出できる。
 - open後はHTTP statusを変えずSSE `{error: {message: 固定文言, type, code, status}}`を1回、`[DONE]`を1回、end。成功finish、usage、完成tool_callsを追加しない。nonstreamの上流途中失敗はエラーJSONのみ、部分成功を返さない。
-- logは`id`（ランダム内部ID）、generation、分類、HTTP status、attempt番号、時刻だけのallowlist。token、認証コード、Authorization、OAuth URL query、request body、SDK error全体やprovider error.messageを出さない。pool用のcatchで既存`console.error(error)`へraw errorが流れないようにする。SDK loggerも無効にし、invalid SSEを含め秘密文字列が出ないテストを行う。legacy全般のlogging修正へ拡大しない。
+- logは`id`（ランダム内部ID）、generation、分類、HTTP status、attempt番号、時刻だけのallowlist。token、認証コード、Authorization、OAuth URL query、request body、SDK error全体やprovider error.messageを出さない。pool用のcatchで既存`console.error(error)`へraw errorが流れないようにする。SDK loggerも無効にし、通常のproviderエラー時に秘密文字列を出さないことを確認する。legacy全般のlogging修正や、特殊な不正SSE専用の追加テストへ拡大しない。
 - setupレスポンスはno-store、入力はpassword、成功/失敗/中止のいずれもtoken/code欄をclear。名前はtextContent/escapeHtmlで出し、tokenをDOM/data属性/localStorage/URLに置かない。
 
 ## 8. Setup APIの確定案
@@ -193,7 +193,9 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 | `POST /setup/claude/start`（拡張） | 上と同じtarget/expectedRevision、token無し。legacyは従来の意味 | 202 `{attemptId,targetId?,state}`。singleton進行中409。addは試行内部でIDを予約するが検証成功までstoreに追加しない |
 | `/setup/claude/status,code,cancel`（拡張） | statusはattemptId query。code/cancelはJSON attemptId。codeのみ認証コード | 現在の試行ID一致だけ受理。不一致409。terminal stateもtargetを表示。cancel/期限切れ後にverifyが完了してもcommit不可 |
 
-新規pool mutationとpool用CLI操作は`application/json`必須（415）、ブラウザOriginがある場合は同一originのみ（403）。既存単一認証のCLI入力互換は維持するがpoolモードで古いtarget-less start/code/cancelを許可しない。これにより新しい削除/順序変更をクロスサイトformで実行できない。CORSを開放しない。既存の許可CIDR外403テストを全追加ルートにも適用する。
+既存のrequest parsingとsocket peer/CIDRアクセス制御を再利用し、既存の保護を弱めずCORSも開放しない。既存単一認証のCLI入力互換は維持するがpoolモードで古いtarget-less start/code/cancelを許可しない。これは通常の複数契約操作で対象を取り違えないためのbindingであり、新たな認証基盤ではない。既存の許可CIDR外403テストを全追加ルートにも適用する。
+
+新設のOrigin検査・JSON-only制限・form拒否とその専用テストは本件の対象外とし、必須の後続作業にも置かない。既存の入力処理を別のセキュリティ機構へ拡張しない。
 
 `ClaudeSetupTokenFlow`はtarget/attempt generationを持ち、verify前後およびapply直前にcancel/試行ID/対象revisionをチェックする。verify自身もAbortSignal/30秒期限/maxRetries:0を受ける共通builder経由の1回呼出し。手動入力とCLIを合わせてsetup verificationは1件だけ、並行時は409。CLI操作は既存公式CLIだけであり、URLが出ない問題を独自OAuthで回避しない。
 
@@ -226,7 +228,7 @@ accounts: Account[]              # 可変長。配列順が優先順位の唯一
 | A6 §5.3 回復 | `chat.accounts.test.ts`: fake clockでreset/Retry-After/未知resetの15→30→60分。期限前0送信、期限後同時要求でもprobe1件、高順位復帰 | 持続cooldown＋観測revision。restart/旧成功との競合assert | background推論禁止、provider resetとlocal probe表示分離 / 未実施 |
 | A7 §6/7 出力境界 | 実HTTP上流200直後error、text/tool/thinking後error、nonstream途中error、切断前後でattempt数1。SSE errorとDONE各1、成功finish/usageなし | upstream-open latch、terminal formatter、abort | 200後の再送禁止。既存message_accumulatorを重複させない / 未実施 |
 | A8 §6 並行/abort/有限試行 | 並行要求でも各要求は逐次N回以下、SDK maxRetries0。probe single-flight、切断後は次attempt無し、delete中/replace中のold-generation結果は無効。既存SDK timeout/abortを維持し、新しい同時数上限・chat共通期限を追加しない | 要求単位のlease＋probe lock＋finally。上流送信順/abort/試行数/観測状態のassert | キュー/hedging/無限retry禁止。legacy retryへ影響させない / 未実施 |
-| A9 §7/8 非漏洩/権限 | `setup.access.test.ts`拡張＋poolログcapture: 全routeでCIDR外403、Origin不一致403、form415、秘密canary入りprovider error/invalid SSEもDOM/JSON/logに無し | 共通peer guard/public projection/safe logger | tokenをmaskで返す新API禁止。OAuth URLは既存認証中の公式リンクに限る / 未実施 |
+| A9 §7/8 既存保護の維持 | `setup.access.test.ts`拡張＋poolログcapture: 追加routeでも既存のCIDR外403を維持。account viewと通常のprovider error処理でtokenがDOM/JSON/logに出ない | 既存peer guardの再利用、public projection、poolエラーの安全な処理 | 新しいセキュリティ機構/無関係なlogging改修は禁止。tokenをmaskで返す新API禁止。OAuth URLは既存認証中の公式リンクに限る / 未実施 |
 | A10 §4.2/7 互換 | 既存`chat.rate-limit.test.ts`、convert/tools/usage tests。file無しでenv順位/429即時/503 SDK retry/SSE非429互換、Bonsai素通し | 明確なlegacy/pool分岐。既存assertの保持、pool pre-open503を外側fixture clientが観測 | 既存host設定へ手を出さない。実ホストfailoverは未検証と報告 / 未実施 |
 | A11 §7 全不可 | 全exhausted→429＋最短Retry-After、全auth/混在/空→503、probe中503、名前漏れなし | 即時集約エラー。HTTP status/body/上流送信0の証拠 | `/health`を契約枠でdownにしない / 未実施 |
 | A12 §3/11 UX/rollback | localhost `/setup`を人間/許可されたbrowser QCで登録/順序/再認証/削除/legacy復帰。1契約故障時に選択対象が見える | 同じ画面の最後まで使える最小UX、保存失敗でも旧経路維持。fake fixture QC記録 | mock UIを本番完了と呼ばない。人間ログインは準備後に本人へ / 未実施 |
@@ -243,6 +245,8 @@ RED失敗ログとGREEN成功ログは分けて保持する。CIの成功は実�
 | 2: 新設グローバル同時数制限は未根拠 | §6.8/7/A8/11.3: 容量制限とそのbusy条件・テストを削除。要求内逐次attemptとprobe single-flightは保持 |
 | 3: 新設chat共通期限は未根拠 | §6.7–9/9/A8/11.3: 共通打切りを削除。既存SDK timeout/abortとN以下の試行上限は保持。§8のsetup検証期限は別用途であり変更しない |
 | 4: 利用条件の警告とoffline実装禁止の混同 | 冒頭/§11.1/11.3: offline実装承認と実資格情報利用・実推論・配備の判断を分離。利用許諾を認定するものではない |
+
+追加の明示的な利用者指示「余計なレアケースやセキュリティの対応は絶対に追加しないでね」に従い、§7/8/A9の新設Origin検査・JSON-only/form拒否・特殊な不正SSE専用テストを対象外にした。これは独立レビューの追加要件ではなく、利用者による範囲縮小である。通常の登録/再認証/削除で誤適用を防ぐtarget/revision binding、secretを含まない一覧、通常エラーのsecret非漏洩、既存socket peer/CIDR保護の再利用は維持する。新しいセキュリティ基盤や無関係なlogging改修、必須の後続hardeningは追加しない。
 
 修正後の独立再レビューは未実施。本記録は実装証拠でも実装承認でもなく、A1–A12のRED/GREEN・実装独立レビュー・実契約受入はすべて未実施。独立レビューは外部Issue/公式資料/SDK外部ソースの内容自体を再取得しておらず、実契約の枠拒否検出成功も未検証である。
 
