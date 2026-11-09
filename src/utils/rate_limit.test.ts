@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { APIError } from "@anthropic-ai/sdk";
-import { classifyExhaustion, providerRetryTime, exhaustionObservation, retryObservation, rateLimitRetryAfter } from "./rate_limit";
-import type { Observed } from "./accounts";
+import { classifyExhaustion, providerRetryTime, exhaustionObservation, rateLimitRetryAfter } from "./rate_limit";
 const now = 1800000000000;
-const unknown: Observed = { state: "unknown", reason: null, retryAt: null, retryBasis: null, failureCount: 0 };
 function error(headers: Record<string, string>, status = 429, type = "rate_limit_error") {
   return new APIError(status, { error: { type } }, "fixture", new Headers(headers));
 }
@@ -30,18 +28,10 @@ test("provider times accept bounded integer reset seconds and safe Retry-After, 
   assert.equal(providerRetryTime(error({ "retry-after": new Date(now + 1000).toUTCString() }), now), now + 1000);
   assert.equal(rateLimitRetryAfter(error({ "retry-after": "99999999999999999" }), now), undefined);
 });
-test("unknown reset and repeated rejection use 15→30→60 minute probes; later provider time wins", () => {
-  const e = error({});
-  let o = exhaustionObservation(e, "session", unknown, now);
-  for (const minutes of [15, 30, 60, 60]) {
-    assert.equal(o.retryAt, now + minutes * 60000);
-    assert.equal(o.retryBasis, "local_probe");
-    o = retryObservation(o, now);
-  }
-  const immediate = exhaustionObservation(error({ "retry-after": "0" }), "weekly", unknown, now);
-  assert.equal(immediate.retryAt, now + 1000);
-  const again = exhaustionObservation(error({ "retry-after": "0" }), "weekly", immediate, now + 1000);
-  assert.equal(again.retryAt, now + 1000 + 15 * 60000);
-  const later = exhaustionObservation(error({ "retry-after": "7200" }), "weekly", again, now);
-  assert.equal(later.retryAt, now + 7200000); assert.equal(later.retryBasis, "provider");
+test("quota observations retain provider timing without inventing a cooldown", () => {
+  assert.deepEqual(exhaustionObservation(error({}), "session", now), {
+    state: "exhausted", reason: "session", retryAt: null, retryBasis: null, failureCount: 0,
+  });
+  const observed = exhaustionObservation(error({ "retry-after": "7200" }), "weekly", now);
+  assert.equal(observed.retryAt, now + 7200000); assert.equal(observed.retryBasis, "provider");
 });

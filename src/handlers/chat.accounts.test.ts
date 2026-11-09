@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer, Server } from "node:http";
 import { AddressInfo } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import app from "../server";
@@ -127,17 +127,40 @@ for (const stream of [false, true]) for (const tools of [false, true]) {
     assert.deepEqual(h.attempts[0].body, h.attempts[1].body);
     assert.equal(h.store.view().accounts[0].observed.state, "exhausted");
     await (await h.chat(stream, tools)).text();
-    assert.equal(h.attempts.length, 3); assert.equal(h.attempts[2].token, "Bearer sk-ant-oat01-second");
+    assert.deepEqual(h.attempts.map(a => a.token), ["Bearer sk-ant-oat01-first", "Bearer sk-ant-oat01-second", "Bearer sk-ant-oat01-first", "Bearer sk-ant-oat01-second"]);
   });
 }
-test("pool all exhausted is bounded with explicit reason and earliest Retry-After", async t => {
-  const h = await poolHarness(t, (_req, res) => reject(res, { ...quotaHeaders, "retry-after": "60" }));
+test("each request retries A then B despite persisted future quota observations", async t => {
+  let secondAvailable = false;
+  const h = await poolHarness(t, (req, res) => {
+    if (secondAvailable && req.headers.authorization?.endsWith("second")) return ok(res);
+    reject(res, { ...quotaHeaders, "retry-after": "3600" });
+  });
+  // Reload a schema-v1 observation written by the old cooldown implementation.
+  const persisted = JSON.parse(readFileSync(h.store.filePath, "utf8"));
+  for (const account of persisted.accounts) account.observed = {
+    state: "exhausted", reason: "weekly", retryAt: Date.now() + 86400000,
+    retryBasis: "local_probe", failureCount: 3,
+  };
+  const file = join(tmpdir(), `hermit-reloaded-${persisted.accounts[0].id}.json`);
+  writeFileSync(file, JSON.stringify(persisted));
+  t.after(() => rmSync(file, { force: true }));
+  process.env.HERMIT_ACCOUNTS_FILE = file;
+  const store = getAccountStore();
   const r = await h.chat(true);
-  assert.equal(r.status, 429); assert.equal(r.headers.get("retry-after"), "60");
+  assert.equal(r.status, 429); assert.equal(r.headers.get("retry-after"), "3600");
   const data = await r.json() as any; assert.equal(data.error.reason, "all_accounts_exhausted");
-  assert.equal(h.attempts.length, 2);
-  assert.equal((await h.chat()).status, 429); assert.equal(h.attempts.length, 2);
+  assert.deepEqual(h.attempts.map(a => a.token), ["Bearer sk-ant-oat01-first", "Bearer sk-ant-oat01-second"]);
+  assert.ok(store.view().accounts.every(a => a.observed.retryAt! > Date.now()));
+  secondAvailable = true;
+  const next = await h.chat();
+  assert.equal(next.status, 200); assert.match(await next.text(), /hello/);
+  assert.deepEqual(h.attempts.map(a => a.token), [
+    "Bearer sk-ant-oat01-first", "Bearer sk-ant-oat01-second",
+    "Bearer sk-ant-oat01-first", "Bearer sk-ant-oat01-second",
+  ]);
 });
+
 for (const [status, headers, expected] of [
   [429, { "retry-after": "2" }, 429], [401, {}, 503], [403, {}, 403], [400, {}, 400], [503, {}, 503],
 ] as [number, Record<string, string>, number][]) test(`pool pre-open ${status} does not switch/retry`, async t => {
@@ -156,27 +179,6 @@ for (const stream of [false, true]) test(`pool upstream open is terminal even be
   const r = await h.chat(stream); assert.equal(r.status, stream ? 200 : 429);
   const text = await r.text(); assert.equal(h.attempts.length, 1);
   if (stream) { assert.equal(text.split("data: [DONE]").length - 1, 1); assert.equal(text.split('"error":').length - 1, 1); }
-});
-test("pool exclusive due recovery skips concurrent requests and restores original priority", async t => {
-  let phase = "reject", release!: () => void, opened!: () => void;
-  const probeOpened = new Promise<void>(r => opened = r);
-  const h = await poolHarness(t, (req, res) => {
-    if (!req.headers.authorization?.endsWith("first")) return ok(res);
-    if (phase === "reject") return reject(res);
-    if (phase === "probe") { release = () => ok(res); opened(); return; }
-    ok(res);
-  });
-  await (await h.chat()).text();
-  const first = h.store.view().accounts[0];
-  const due = h.store.acquire(first.id, first.observed.retryAt!)!;
-  h.store.observe(due, { ...due.account.observed, retryAt: 1 }); h.store.release(due);
-  phase = "probe";
-  const pending = h.chat(); await probeOpened;
-  assert.equal(h.store.view().accounts[0].observed.state, "recovering");
-  await (await h.chat()).text(); assert.equal(h.attempts[h.attempts.length - 1].token, "Bearer sk-ant-oat01-second");
-  release(); await (await pending).text(); phase = "healthy";
-  await (await h.chat()).text(); assert.equal(h.attempts[h.attempts.length - 1].token, "Bearer sk-ant-oat01-first");
-  assert.equal(h.store.view().accounts[0].observed.state, "available");
 });
 test("setup reorder/update/failure/conflict/delete/legacy return affect subsequent forwarding only", async t => {
   const h = await poolHarness(t, (_req, res) => ok(res));

@@ -237,12 +237,12 @@ export function renderPage(): string {
     accountView = data;
     const usage = {
       'env-auth-token': '現在は従来の契約を使用しています。契約の自動切替は無効です。',
-      pool: '契約の自動切替が有効です。一覧の上から順に、利用できる契約を使います。',
+      pool: '契約の自動切替が有効です。要求ごとに一覧の上から問い合わせ、枠切れなら次の契約を使います。',
       'env-api-key': '現在はAPIキーを使用しています。一覧の契約への自動切替は行いません。',
       none: '認証情報が設定されていません。契約の自動切替は無効です。',
       credential_config_error: '契約ファイルの設定エラーにより、契約を使用できません。'
     };
-    document.getElementById('account-status').textContent = usage[data.effectiveSource] + (data.observationSaveFailed ? ' — 状態の保存に失敗。再起動すると未保存の冷却状態が失われる場合があります。' : '');
+    document.getElementById('account-status').textContent = usage[data.effectiveSource] + (data.observationSaveFailed ? ' — 状態の保存に失敗。再起動すると未保存の観測状態が失われる場合があります。' : '');
     document.getElementById('enable-pool').disabled = data.effectiveSource === 'env-api-key' || data.configError;
     const selected = targetSelect.value;
     targetSelect.replaceChildren();
@@ -250,11 +250,11 @@ export function renderPage(): string {
     if (data.mode !== 'pool') option('legacy', '従来の契約の認証情報を更新');
     option('add', '新しい契約を追加');
     const list = document.getElementById('accounts'); list.replaceChildren();
-    const states = { unknown: '追加・更新後の接続は未確認', available: '利用可能', exhausted: '枠切れ', reauth: '再認証待ち', recovering: '回復確認中' };
+    const states = { unknown: '追加・更新後の接続は未確認', available: '前回は利用成功', exhausted: '前回は枠切れ（次の要求で再試行）', reauth: '再認証待ち' };
     data.accounts.forEach((a, index) => {
       option(a.id, a.name + 'の認証情報を更新');
       const item = document.createElement('li');
-      item.textContent = a.name + ' — 一覧に追加済み / ' + states[a.observed.state] + (a.observed.retryAt ? ' / ' + (a.observed.retryBasis === 'provider' ? '次回利用可能時刻: ' : '次回確認可能時刻: ') + new Date(a.observed.retryAt).toLocaleString() : '');
+      item.textContent = a.name + ' — 一覧に追加済み / ' + states[a.observed.state];
       function button(text, action, disabled = false) { const b = document.createElement('button'); b.textContent = text; b.disabled = disabled; b.onclick = action; item.append(b); }
       button('認証情報を更新', () => { targetSelect.value = a.id; document.getElementById('token').focus(); });
       button('名前変更', () => { const name = prompt('契約の名前', a.name); if (name) mutateAccounts({ action: 'rename', id: a.id, name }); });

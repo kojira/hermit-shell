@@ -89,16 +89,7 @@ export function providerRetryTime(error: APIError, now = Date.now()): number | u
   return retryAt === undefined ? resetAt : Math.max(resetAt, retryAt);
 }
 import type { Observed } from "./accounts";
-export function retryObservation(previous: Observed, now = Date.now()): Observed {
-  const failureCount = previous.failureCount + 1;
-  const minutes = failureCount === 1 ? 15 : failureCount === 2 ? 30 : 60;
-  return { ...previous, state: "exhausted", failureCount, retryAt: now + minutes * 60000, retryBasis: "local_probe" };
-}
-export function exhaustionObservation(error: APIError, reason: "session" | "weekly", previous: Observed, now = Date.now()): Observed {
+export function exhaustionObservation(error: APIError, reason: "session" | "weekly", now = Date.now()): Observed {
   const provider = providerRetryTime(error, now);
-  const local = retryObservation(previous, now);
-  if (provider !== undefined && (previous.state !== "exhausted" || provider > local.retryAt!)) {
-    return { state: "exhausted", reason, retryAt: Math.max(now + 1000, provider), retryBasis: "provider", failureCount: previous.failureCount };
-  }
-  return { ...local, reason };
+  return { state: "exhausted", reason, retryAt: provider ?? null, retryBasis: provider === undefined ? null : "provider", failureCount: 0 };
 }

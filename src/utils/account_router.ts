@@ -1,7 +1,7 @@
 import { APIError } from "@anthropic-ai/sdk";
 import { AccountStore, Lease } from "./accounts";
 import { buildAuthTokenClient } from "./auth";
-import { classifyExhaustion, exhaustionObservation, retryObservation } from "./rate_limit";
+import { classifyExhaustion, exhaustionObservation } from "./rate_limit";
 
 export class PoolUnavailableError extends Error {
   constructor(public status: number, public code: string, public retryAfter?: string) { super(code); }
@@ -37,15 +37,13 @@ export class AccountRouter {
         if (signal?.aborted) throw error;
         const exhausted = classifyExhaustion(error);
         if (exhausted) {
-          this.store.observe(lease, exhaustionObservation(error as APIError, exhausted, lease.account.observed));
+          this.store.observe(lease, exhaustionObservation(error as APIError, exhausted));
           if (!opened) continue;
         } else if (error instanceof APIError && error.status === 401) {
           this.store.observe(lease, { state: "reauth", reason: "unauthorized", retryAt: null, retryBasis: null, failureCount: 0 });
-        } else if (lease.recovery) {
-          this.store.observe(lease, retryObservation(lease.account.observed));
         }
         throw error;
-      } finally { this.store.release(lease); }
+      }
     }
     const unavailable = this.store.unavailable();
     throw new PoolUnavailableError(unavailable.status, unavailable.code, unavailable.retryAfter);
