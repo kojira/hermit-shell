@@ -1,0 +1,47 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { APIError } from "@anthropic-ai/sdk";
+import { classifyExhaustion, providerRetryTime, exhaustionObservation, retryObservation, rateLimitRetryAfter } from "./rate_limit";
+import type { Observed } from "./accounts";
+const now = 1800000000000;
+const unknown: Observed = { state: "unknown", reason: null, retryAt: null, retryBasis: null, failureCount: 0 };
+function error(headers: Record<string, string>, status = 429, type = "rate_limit_error") {
+  return new APIError(status, { error: { type } }, "fixture", new Headers(headers));
+}
+test("quota classification requires APIError, rate-limit envelope and exact rejected/claim values", () => {
+  assert.equal(classifyExhaustion({ status: 429 }), undefined);
+  assert.equal(classifyExhaustion(error({})), undefined);
+  assert.equal(classifyExhaustion(error({ "Anthropic-RateLimit-Unified-7d-Status": "rejected" })), "weekly");
+  for (const [claim, expected] of [["five_hour", "session"], ["seven_day", "weekly"], ["other", undefined], ["Five_Hour", undefined]] as const) {
+    assert.equal(classifyExhaustion(error({ "anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-representative-claim": claim })), expected);
+  }
+  assert.equal(classifyExhaustion(error({ "anthropic-ratelimit-unified-7d-status": "Rejected" })), undefined);
+  assert.equal(classifyExhaustion(error({ "anthropic-ratelimit-unified-7d-status": "rejected" }, 500, "api_error")), undefined);
+  assert.equal(classifyExhaustion(error({ "anthropic-ratelimit-unified-7d-status": "rejected" }, 400)), "weekly");
+  assert.equal(classifyExhaustion(error({ "anthropic-ratelimit-unified-7d-status": "rejected", "anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-representative-claim": "five_hour" })), "weekly");
+});
+test("provider times accept bounded integer reset seconds and safe Retry-After, choosing the later", () => {
+  assert.equal(providerRetryTime(error({ "anthropic-ratelimit-unified-reset": String(now / 1000 + 10), "retry-after": "20" }), now), now + 20000);
+  for (const value of [String(now / 1000), String(now / 1000 + 8 * 86400 + 1), "1.5", "-1", "9007199254740992", "tomorrow"]) {
+    assert.equal(providerRetryTime(error({ "anthropic-ratelimit-unified-reset": value }), now), undefined);
+  }
+  assert.equal(providerRetryTime(error({ "retry-after": "0" }), now), now);
+  assert.equal(providerRetryTime(error({ "retry-after": new Date(now - 1000).toUTCString() }), now), now);
+  assert.equal(providerRetryTime(error({ "retry-after": new Date(now + 1000).toUTCString() }), now), now + 1000);
+  assert.equal(rateLimitRetryAfter(error({ "retry-after": "99999999999999999" }), now), undefined);
+});
+test("unknown reset and repeated rejection use 15→30→60 minute probes; later provider time wins", () => {
+  const e = error({});
+  let o = exhaustionObservation(e, "session", unknown, now);
+  for (const minutes of [15, 30, 60, 60]) {
+    assert.equal(o.retryAt, now + minutes * 60000);
+    assert.equal(o.retryBasis, "local_probe");
+    o = retryObservation(o, now);
+  }
+  const immediate = exhaustionObservation(error({ "retry-after": "0" }), "weekly", unknown, now);
+  assert.equal(immediate.retryAt, now + 1000);
+  const again = exhaustionObservation(error({ "retry-after": "0" }), "weekly", immediate, now + 1000);
+  assert.equal(again.retryAt, now + 1000 + 15 * 60000);
+  const later = exhaustionObservation(error({ "retry-after": "7200" }), "weekly", again, now);
+  assert.equal(later.retryAt, now + 7200000); assert.equal(later.retryBasis, "provider");
+});

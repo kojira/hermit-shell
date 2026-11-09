@@ -502,3 +502,47 @@ test("setup page never renders a link without an href and explains the manual fa
   assert.match(html, /data\.state === 'manual_token_required'/);
   assert.match(html, /hideAuthLink\(\)/);
 });
+
+test("cancelled verification and late CLI events cannot apply into a newer attempt", async () => {
+  const children = [new FakeChild(), new FakeChild()];
+  let spawned = 0, release!: (result: { ok: true }) => void;
+  const applied: string[] = [];
+  const flow = new ClaudeSetupTokenFlow({
+    spawn: () => children[spawned++], verify: () => new Promise(r => release = r),
+    apply: value => applied.push(value), resetClient: () => {},
+  });
+  flow.start();
+  children[0].stdout.emit("data", token); children[0].emit("close", 0, null);
+  assert.equal(flow.status().state, "verifying");
+  const oldAttempt = flow.getAttemptId();
+  flow.cancel(); flow.start();
+  assert.notEqual(flow.getAttemptId(), oldAttempt);
+  release({ ok: true }); await settle();
+  children[0].stdout.emit("data", token); children[0].emit("close", 0, null);
+  await settle();
+  assert.deepEqual(applied, []); assert.equal(flow.status().state, "waiting_for_user");
+  flow.cancel();
+});
+
+test("CLI registration uses captured AccountStore target and rejects deleted/replaced revisions", async t => {
+  const { AccountStore } = await import("./accounts");
+  const fs = await import("node:fs"), path = await import("node:path"), os = await import("node:os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-account-target-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = new AccountStore(path.join(dir, "accounts.json"));
+  store.saveToken({ name: "original", expectedRevision: 0 }, "sk-ant-oat01-original");
+  const account = store.view().accounts[0];
+  let release!: (result: { ok: true }) => void;
+  const { flow, child } = makeFlow({ verify: () => new Promise(r => release = r) });
+  flow.start(value => store.saveToken({ id: account.id, generation: 1, expectedRevision: 1 }, value));
+  child.stdout.emit("data", token); child.emit("close", 0, null);
+  store.mutate({ action: "delete", id: account.id, expectedRevision: 1 });
+  release({ ok: true }); await settle();
+  assert.equal(flow.status().state, "error"); assert.equal(store.view().accounts.length, 0);
+  const good = makeFlow();
+  good.flow.start(value => store.saveToken({ name: "new contract", expectedRevision: 2 }, value));
+  good.child.stdout.emit("data", token); good.child.emit("close", 0, null);
+  await settle();
+  assert.equal(good.flow.status().state, "success");
+  assert.equal(store.acquire(store.snapshot()[0])!.account.authToken, token);
+});

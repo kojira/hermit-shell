@@ -1,4 +1,6 @@
 import { Request, Response } from "express";
+import { AccountError, getAccountStore } from "../utils/accounts";
+import { getAccountRouter, PoolUnavailableError } from "../utils/account_router";
 import { createAnthropicClient, resolveAuth } from "../utils/auth";
 import {
   convertRequest,
@@ -264,6 +266,12 @@ export async function handleChatCompletions(
       return;
     }
 
+    const store = getAccountStore();
+    const pool = store.isPool();
+    if (pool) {
+      await handlePoolChat(res, body, getAccountRouter(store));
+      return;
+    }
     const auth = resolveAuth();
     const authToken =
       "apiKey" in auth
@@ -295,6 +303,10 @@ export async function handleChatCompletions(
       }
     }
   } catch (error: any) {
+    if (error instanceof AccountError) {
+      res.status(error.status).json({ error: { message: error.code, code: error.code, type: "api_error" } });
+      return;
+    }
     console.error("Chat completion error:", error);
 
     if (sendRateLimitResponse(res, error)) return;
@@ -335,10 +347,11 @@ async function streamMessage(
   params: Record<string, unknown>,
   signal?: AbortSignal,
   onText?: (text: string) => void,
-  onOpen?: () => void
+  onOpen?: () => void,
+  selectedClient = getClient()
 ): Promise<any> {
   const { stream: _stream, ...rest } = params;
-  const events = await getClient().messages.create(
+  const events = await selectedClient.messages.create(
     { ...(rest as any), stream: true },
     signal ? { signal } : undefined
   );
@@ -377,12 +390,15 @@ async function handleNonStreamingWithTools(
  * SSE 応答の共通処理。text はリアルタイムで流し、最終メッセージで finish を送る。
  * クライアント切断時は上流を abort し、その abort は正常系として静かに終える（issue #3）。
  */
+type MessageExecution = (signal?: AbortSignal, onText?: (text: string) => void, onOpen?: () => void) => Promise<any>;
+
 async function runSseStream(
   res: Response,
   anthropicReq: Record<string, unknown>,
   requestedModel: string,
   includeUsage: boolean,
-  writeFinal: (ctx: StreamContext, finalMsg: any) => void
+  writeFinal: (ctx: StreamContext, finalMsg: any) => void,
+  execute?: MessageExecution
 ): Promise<void> {
   const ctx = createStreamContext(requestedModel);
   const openSSE = () => {
@@ -395,7 +411,7 @@ async function runSseStream(
   res.on("close", () => controller.abort());
 
   try {
-    const finalMsg = await streamMessage(anthropicReq, controller.signal, (text) => {
+    const finalMsg = await (execute ?? ((signal, onText, onOpen) => streamMessage(anthropicReq, signal, onText, onOpen)))(controller.signal, (text) => {
       if (!res.writableEnded) res.write(createStreamChunk(ctx.id, ctx.model, ctx.created, text));
     }, openSSE);
     // 切断時 SDK の反復は静かに終わり部分メッセージが返るため、書き込まずに終える。
@@ -407,12 +423,13 @@ async function runSseStream(
     sendDone(res);
   } catch (error: unknown) {
     if (controller.signal.aborted || isAbortError(error)) return;
-    console.error("Stream error:", error);
+    if (execute && !res.headersSent) { sendPoolError(res, error); return; }
+    if (!execute) console.error("Stream error:", error);
     if (res.writableEnded) return;
     if (sendRateLimitResponse(res, error)) return;
     // Keep the existing HTTP200/generic SSE error contract for non-rate-limit failures.
     if (!res.headersSent) openSSE();
-    const message = error instanceof Error ? error.message : String(error);
+    const message = execute ? "Upstream request failed" : error instanceof Error ? error.message : String(error);
     res.write(`data: ${JSON.stringify({ error: { message, type: "api_error" } })}\n\n`);
     sendDone(res);
   }
@@ -422,12 +439,13 @@ async function handleStreaming(
   res: Response,
   anthropicReq: any,
   requestedModel: string,
-  includeUsage: boolean = false
+  includeUsage: boolean = false,
+  execute?: MessageExecution
 ): Promise<void> {
   await runSseStream(res, anthropicReq, requestedModel, includeUsage, (ctx, finalMsg) => {
     const finishReason = finalMsg.stop_reason === "max_tokens" ? "length" : "stop";
     res.write(createFinalChunk(ctx.id, ctx.model, ctx.created, finishReason, finalMsg));
-  });
+  }, execute);
 }
 
 /**
@@ -439,7 +457,8 @@ async function handleStreamingWithTools(
   res: Response,
   anthropicReq: Record<string, unknown>,
   requestedModel: string,
-  includeUsage: boolean = false
+  includeUsage: boolean = false,
+  execute?: MessageExecution
 ): Promise<void> {
   await runSseStream(res, anthropicReq, requestedModel, includeUsage, (ctx, finalMsg) => {
     const toolCalls = (finalMsg.content ?? []).filter((c: any) => c.type === "tool_use");
@@ -475,5 +494,42 @@ async function handleStreamingWithTools(
         ? "length"
         : "stop";
     res.write(createFinalChunk(ctx.id, ctx.model, ctx.created, finishReason, finalMsg));
+  }, execute);
+}
+
+
+function sendPoolError(res: Response, error: any): void {
+  if (error instanceof PoolUnavailableError || error instanceof AccountError) {
+    if (error instanceof PoolUnavailableError && error.retryAfter) res.setHeader("Retry-After", error.retryAfter);
+    const exhausted = error.code === "all_accounts_exhausted";
+    res.status(error.status).json({ error: { message: error.code, type: exhausted ? "rate_limit_error" : "api_error", code: exhausted ? "rate_limit_exceeded" : error.code, reason: error.code, param: null } });
+    return;
+  }
+  if (sendRateLimitResponse(res, error)) return;
+  const upstreamStatus = error?.status;
+  const timeout = error?.name === "APIConnectionTimeoutError";
+  const status = timeout ? 504 : !upstreamStatus || upstreamStatus === 401 || upstreamStatus >= 500 ? 503 : upstreamStatus;
+  res.status(status).json({ error: { message: "Upstream request failed", type: "api_error", code: upstreamStatus === 401 ? "credentials_unavailable" : "upstream_error", param: null } });
+}
+
+async function handlePoolChat(res: Response, body: OpenAIChatRequest & { tools?: OpenAITool[] }, router: ReturnType<typeof getAccountRouter>) {
+  const execute: MessageExecution = (signal, onText, onOpen) => router.run(signal, async (client, token, opened) => {
+    const params = hasTools(body) ? buildAnthropicRequestWithTools(body, token) : convertRequest(body, token);
+    ensureDefaultCacheControl(params);
+    return streamMessage({ ...params }, signal, onText, () => { opened(); onOpen?.(); }, client);
   });
+  if (body.stream) {
+    const handler = hasTools(body) ? handleStreamingWithTools : handleStreaming;
+    await handler(res, {}, body.model, (body as any).stream_options?.include_usage === true, execute);
+    return;
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  res.on("close", abort);
+  try {
+    const message = await execute(controller.signal);
+    if (!controller.signal.aborted && !res.writableEnded) res.json(hasTools(body) ? convertResponseWithTools(message, body.model) : convertResponse(message, body.model));
+  } catch (error) {
+    if (!controller.signal.aborted && !res.writableEnded) sendPoolError(res, error);
+  } finally { res.off("close", abort); }
 }

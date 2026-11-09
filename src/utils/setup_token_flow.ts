@@ -29,9 +29,9 @@ export type SetupTokenState =
   | { state: "manual_token_required"; message: string }
   | { state: "error"; message: string };
 
-export type PublicSetupTokenStatus = SetupTokenState;
+export type PublicSetupTokenStatus = SetupTokenState & { attemptId?: number };
 
-export function publicSetupTokenStatus(state: SetupTokenState): PublicSetupTokenStatus {
+export function publicSetupTokenStatus(state: PublicSetupTokenStatus): PublicSetupTokenStatus {
   return state;
 }
 
@@ -141,6 +141,8 @@ export class ClaudeSetupTokenFlow {
     return this.current;
   }
 
+  getAttemptId(): number { return this.attemptId; }
+
   cancel(): { cancelled: boolean } {
     const active =
       this.current.state === "waiting_for_user" ||
@@ -199,7 +201,7 @@ export class ClaudeSetupTokenFlow {
     }
   }
 
-  start(): { started: true } | { started: false; reason: "already_running" } {
+  start(apply = this.deps.apply): { started: true } | { started: false; reason: "already_running" } {
     if (
       this.current.state === "waiting_for_user" ||
       this.current.state === "waiting_for_cli" ||
@@ -220,13 +222,15 @@ export class ClaudeSetupTokenFlow {
     this.child = child;
     this.current = { state: "waiting_for_user" };
     this.trace("flow_started");
-    child.stdout.on("data", (chunk) => this.acceptOutput(chunk, "stdout"));
-    child.stderr.on("data", (chunk) => this.acceptOutput(chunk, "stderr"));
+    const attempt = this.attemptId;
+    child.stdout.on("data", (chunk) => { if (attempt === this.attemptId) this.acceptOutput(chunk, "stdout"); });
+    child.stderr.on("data", (chunk) => { if (attempt === this.attemptId) this.acceptOutput(chunk, "stderr"); });
     child.on("error", () => {
+      if (attempt !== this.attemptId) return;
       this.trace("cli_process_error");
       this.fail("Claude認証を開始できませんでした", true, "child_error");
     });
-    child.on("close", (code) => void this.handleClose(code));
+    child.on("close", (code) => { if (attempt === this.attemptId) void this.handleClose(code, apply); });
     this.armAuthUrlDeadline(this.deps.authUrlTimeoutMs);
     this.timer = setTimeout(() => {
       this.trace("flow_timeout", { timeoutMs: this.deps.timeoutMs });
@@ -365,7 +369,7 @@ export class ClaudeSetupTokenFlow {
     }
   }
 
-  private async handleClose(code: number | null): Promise<void> {
+  private async handleClose(code: number | null, apply: (token: string) => void): Promise<void> {
     if (this.finished) return;
     this.trace("cli_closed", { code });
     this.clearTimer();
@@ -380,15 +384,17 @@ export class ClaudeSetupTokenFlow {
     const token = this.capturedToken;
     this.capturedToken = null;
     this.scanTail = "";
+    const attempt = this.attemptId;
     try {
       const verified = await this.deps.verify(token);
+      if (this.finished || attempt !== this.attemptId) return;
       if (!verified.ok) {
         this.trace("verification_failed", { status: verified.status ?? null });
-        this.fail("Claude認証の検証に失敗しました", false, "verification_failed");
+        this.fail(verified.status === 429 ? "現在検証できません（429）。後で再試行してください。" : "Claude認証の検証に失敗しました", false, "verification_failed");
         return;
       }
       this.trace("verification_succeeded");
-      this.deps.apply(token);
+      apply(token);
       this.deps.resetClient();
       this.trace("token_applied");
       this.finished = true;
@@ -396,7 +402,8 @@ export class ClaudeSetupTokenFlow {
       this.clearAuthUrlTimer();
       this.current = { state: "success" };
     } catch {
-      this.fail("Claude認証を適用できませんでした", false, "apply_failed");
+      if (this.finished || attempt !== this.attemptId) return;
+      this.fail("Claude認証を適用できませんでした。構成の変更・重複登録・保存先を確認し、再試行してください。", false, "apply_failed");
     }
   }
 

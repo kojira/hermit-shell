@@ -43,11 +43,12 @@ const OAUTH_BETA = `claude-code-20250219,oauth-2025-04-20,${BASE_BETA},interleav
  * ——検証で通した組み立てと本番の組み立てがズレて「検証は通ったのに本番で失敗」を
  * 起こさないため。
  */
-function buildAuthTokenClient(authToken: string, options: Pick<ClientOptions, "fetch"> = {}) {
+export function buildAuthTokenClient(authToken: string, options: Pick<ClientOptions, "fetch" | "maxRetries"> = {}) {
   const Anthropic = require("@anthropic-ai/sdk");
   return new Anthropic.default({
     ...options,
     authToken,
+    apiKey: null,
     defaultHeaders: {
       "anthropic-beta": OAUTH_BETA,
       "user-agent": CLAUDE_CLI_USER_AGENT,
