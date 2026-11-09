@@ -32,7 +32,7 @@ export function getAnthropicAuthToken(): string | null {
   return null;
 }
 
-export const CLAUDE_CLI_USER_AGENT = "claude-cli/2.1.280";
+export const CLAUDE_CLI_USER_AGENT = "claude-cli/2.1.321";
 
 const BASE_BETA = "fine-grained-tool-streaming-2025-05-14";
 const OAUTH_BETA = `claude-code-20250219,oauth-2025-04-20,${BASE_BETA},interleaved-thinking-2025-05-14`;

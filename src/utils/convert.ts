@@ -9,9 +9,9 @@ export function mapModel(model: string): string {
 // Opus 5 系は temperature を送ると Anthropic が 400
 // "`temperature` is deprecated for this model." を返す（実測: claude-opus-5）。
 // dated variant (claude-opus-5-YYYYMMDD 等) も同じ family なので前方一致で判定する。
-// Sonnet 5.5 も非デフォルトの temperature / top_p / top_k で 400 を返す（公式 migration guide）。
+// Sonnet 5.5 と Fable 5.2 も非デフォルトの temperature / top_p / top_k で 400 を返す（公式 docs）。
 // haiku と Sonnet 5.5 より前の sonnet では temperature は有効なので対象にしない。
-const TEMPERATURE_UNSUPPORTED_PREFIXES = ["claude-opus-5", "claude-sonnet-5-5"];
+const TEMPERATURE_UNSUPPORTED_PREFIXES = ["claude-opus-5", "claude-sonnet-5-5", "claude-fable-5"];
 
 export function modelSupportsTemperature(model: string): boolean {
   return !TEMPERATURE_UNSUPPORTED_PREFIXES.some((p) => model.startsWith(p));

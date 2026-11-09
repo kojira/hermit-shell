@@ -9,6 +9,7 @@ export function handleModels(_req: Request, res: Response): void {
     "claude-opus-4-6",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
+    "claude-fable-5-2",
   ];
   const models = CLAUDE_MODELS.map((id) => ({
     id,

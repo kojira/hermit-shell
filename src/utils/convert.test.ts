@@ -5,6 +5,7 @@ import { resolveTemperature } from "./convert";
 test("drops temperature for models that reject sampling parameters", () => {
   assert.equal(resolveTemperature("claude-sonnet-5-5", 0.7), undefined);
   assert.equal(resolveTemperature("claude-opus-5-5", 0.7), undefined);
+  assert.equal(resolveTemperature("claude-fable-5-2", 0.7), undefined);
 });
 
 test("keeps temperature for models that accept it", () => {
