@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import * as fs from "fs";
+import { AccountError, getAccountStore, TokenTarget } from "../utils/accounts";
 import {
   resolveAuth,
   verifyAuthToken,
@@ -21,6 +22,8 @@ const claudeSetupTokenFlow = new ClaudeSetupTokenFlow({
   apply: applyAuthToken,
   resetClient,
 });
+
+let poolClaudeAttempt = false;
 
 /** tailnet (CGNAT) を既定の許可範囲にする。 */
 export const DEFAULT_SETUP_ALLOW_CIDR = "100.64.0.0/10";
@@ -153,6 +156,19 @@ export function renderPage(): string {
   <div class="muted">最終適用: ${lastSafe}</div>
 </div>
 <div class="card">
+  <h2>契約の優先切替</h2>
+  <p id="account-status">構成を読み込み中...</p>
+  <ol id="accounts"></ol>
+  <button id="import-account">現在の単一Bearerを取り込む</button>
+  <button id="enable-pool">優先切替を有効にする</button>
+  <button id="disable-pool">従来の単一認証へ戻す</button>
+  <p id="account-result" role="status"></p>
+  <label for="account-target">追加・更新先（下のブラウザ認証／手動入力で共通）</label>
+  <select id="account-target"><option value="legacy">従来の単一認証を更新</option><option value="add">新しい契約を追加</option></select>
+  <input id="account-name" type="text" placeholder="追加する契約の名前">
+  <p class="muted">検証要求は利用枠を消費する場合があります。検証成功時だけ保存します。元の単一認証は取り込み後も保持します。保存は新規要求から反映し、進行中の応答は続行します。</p>
+</div>
+<div class="card">
   <h2>ブラウザで再認証</h2>
   <p>Claudeのログイン・同意・2段階認証は、開いたブラウザでご自身が行います。hermit-shellは認証完了後にClaude CLIが発行したセットアップトークンだけを内部で検証・適用し、画面やログには表示しません。</p>
   <button id="claude-login">Claudeで再認証</button>
@@ -185,6 +201,75 @@ export function renderPage(): string {
   <p class="muted">入力トークンで Anthropic へ最小の検証呼び出しを行い、成功したときだけ保存・即適用します。失敗時は何も変更しません。</p>
 </div>
 <script>
+  let accountView = null;
+  let attemptId;
+  const targetSelect = document.getElementById('account-target');
+  const accountResult = document.getElementById('account-result');
+  const accountErrors = {
+    configuration_changed: '構成が変更されました。一覧を確認して再試行してください。',
+    account_changed: '対象の契約が更新・削除されました。一覧を確認してください。',
+    duplicate_token: 'このトークンは既に別の契約へ登録済みです。',
+    api_key_has_priority: '環境APIキーが優先されています。優先切替は有効にできません。',
+    credential_save_failed: '保存できませんでした。保存先の権限・空き容量を確認してください。',
+    credential_config_error: '契約ファイルが破損しています。ファイルを退避し、再起動して復旧してください。',
+    legacy_bearer_unavailable: '取り込み可能な単一Bearerがありません。',
+    account_name_required: '追加する契約の名前を入力してください。',
+    account_target_required: '追加・更新する契約を選択してください。'
+  };
+  function explain(error) { return accountErrors[error] || error; }
+  function tokenTarget() {
+    if (!accountView) throw new Error('構成の読み込みを待ってください。');
+    const id = targetSelect.value;
+    if (id === 'legacy') return {};
+    if (id === 'add') {
+      const name = document.getElementById('account-name').value.trim();
+      if (!name) throw new Error('追加する契約の名前を入力してください。');
+      return { name, expectedRevision: accountView.revision };
+    }
+    const account = accountView.accounts.find(a => a.id === id);
+    if (!account) throw new Error('更新対象を選び直してください。');
+    return { id, generation: account.generation, expectedRevision: accountView.revision };
+  }
+  async function refreshAccounts() {
+    const r = await fetch('/setup/accounts', { cache: 'no-store' });
+    const data = await r.json();
+    if (!r.ok) throw new Error(explain(data.error));
+    accountView = data;
+    document.getElementById('account-status').textContent = '認証モード: ' + (data.mode === 'pool' ? '優先切替' : '従来の単一認証') + ' / 有効な認証源: ' + data.effectiveSource + (data.configError ? ' — 契約ファイルの設定エラー' : '') + (data.observationSaveFailed ? ' — 状態の保存に失敗。再起動すると未保存の冷却状態が失われる場合があります。' : '');
+    document.getElementById('enable-pool').disabled = data.effectiveSource === 'env-api-key' || data.configError;
+    const selected = targetSelect.value;
+    targetSelect.replaceChildren();
+    function option(value, text) { const o = document.createElement('option'); o.value = value; o.textContent = text; targetSelect.append(o); }
+    if (data.mode !== 'pool') option('legacy', '従来の単一認証を更新');
+    option('add', '新しい契約を追加');
+    const list = document.getElementById('accounts'); list.replaceChildren();
+    const states = { unknown: '未確認', available: '利用可能', exhausted: '枠切れ', reauth: '再認証待ち', recovering: '回復確認中' };
+    data.accounts.forEach((a, index) => {
+      option(a.id, a.name + 'を更新');
+      const item = document.createElement('li');
+      item.textContent = a.name + ' — 登録済み / ' + states[a.observed.state] + (a.observed.retryAt ? ' / ' + (a.observed.retryBasis === 'provider' ? '次回利用可能時刻: ' : '次回確認可能時刻: ') + new Date(a.observed.retryAt).toLocaleString() : '');
+      function button(text, action, disabled = false) { const b = document.createElement('button'); b.textContent = text; b.disabled = disabled; b.onclick = action; item.append(b); }
+      button('更新', () => { targetSelect.value = a.id; document.getElementById('token').focus(); });
+      button('名前変更', () => { const name = prompt('契約の名前', a.name); if (name) mutateAccounts({ action: 'rename', id: a.id, name }); });
+      for (const [label, delta] of [['↑', -1], ['↓', 1]]) button(label, () => { const ids = data.accounts.map(a => a.id); [ids[index], ids[index + delta]] = [ids[index + delta], ids[index]]; mutateAccounts({ action: 'reorder', ids }); }, index + delta < 0 || index + delta >= data.accounts.length);
+      button('削除', () => { if (confirm(a.name + 'をこの一覧から削除します。提供元での失効ではありません。最後の1件を削除しても単一認証には戻りません。')) mutateAccounts({ action: 'delete', id: a.id }); });
+      list.append(item);
+    });
+    if ([...targetSelect.options].some(o => o.value === selected)) targetSelect.value = selected;
+  }
+  async function mutateAccounts(operation) {
+    try {
+      const r = await fetch('/setup/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...operation, expectedRevision: accountView.revision }) });
+      const data = await r.json();
+      if (!r.ok) throw new Error(explain(data.error));
+      accountResult.textContent = '保存しました。次の要求から反映されます。';
+    } catch (error) { accountResult.textContent = error.message; }
+    await refreshAccounts().catch(error => { accountResult.textContent = error.message; });
+  }
+  document.getElementById('import-account').onclick = () => { const name = prompt('取り込む契約の名前', '元の契約'); if (name) mutateAccounts({ action: 'import', name }); };
+  document.getElementById('enable-pool').onclick = () => mutateAccounts({ action: 'mode', mode: 'pool' });
+  document.getElementById('disable-pool').onclick = () => mutateAccounts({ action: 'mode', mode: 'legacy' });
+  refreshAccounts().catch(error => { accountResult.textContent = error.message; });
   const claudeBtn = document.getElementById('claude-login');
   const claudeCancelBtn = document.getElementById('claude-cancel');
   const claudeCodeArea = document.getElementById('claude-code-area');
@@ -220,6 +305,7 @@ export function renderPage(): string {
     try {
       const r = await fetch('/setup/claude/status', { cache: 'no-store' });
       const data = await r.json();
+      attemptId = data.attemptId;
       if (data.state === 'waiting_for_user') {
         claudeBtn.disabled = true;
         claudeCancelBtn.style.display = 'inline-block';
@@ -265,7 +351,8 @@ export function renderPage(): string {
       } else if (data.state === 'success') {
         hideManualHint();
         claudeResult.className = 'ok';
-        claudeResult.textContent = 'Claudeの再認証を適用しました。';
+        claudeResult.textContent = '検証・保存が完了しました。次の要求から反映されます。';
+        await refreshAccounts();
         claudeBtn.disabled = false;
         claudeCancelBtn.style.display = 'none';
         claudeCodeSubmit.disabled = false;
@@ -299,13 +386,13 @@ export function renderPage(): string {
     claudeResult.style.display = 'block';
     claudeResult.textContent = 'Claude認証を開始しています...';
     try {
-      const r = await fetch('/setup/claude/start', { method: 'POST' });
+      const r = await fetch('/setup/claude/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(tokenTarget()) });
       const data = await r.json();
       if (!r.ok) {
         if (claudeAuthWindow) claudeAuthWindow.close();
         claudeAuthWindow = null;
         claudeResult.className = 'err';
-        claudeResult.textContent = data.error || 'Claude認証を開始できませんでした。';
+        claudeResult.textContent = explain(data.error) || 'Claude認証を開始できませんでした。';
         claudeBtn.disabled = false;
         return;
       }
@@ -313,11 +400,11 @@ export function renderPage(): string {
       claudeCodeInput.value = '';
       await pollClaudeStatus();
       statusTimer = setInterval(pollClaudeStatus, 1000);
-    } catch (_) {
+    } catch (error) {
       if (claudeAuthWindow) claudeAuthWindow.close();
       claudeAuthWindow = null;
       claudeResult.className = 'err';
-      claudeResult.textContent = '通信エラー';
+      claudeResult.textContent = error.message || '通信エラー';
       claudeBtn.disabled = false;
     }
   });
@@ -325,7 +412,7 @@ export function renderPage(): string {
   claudeCancelBtn.addEventListener('click', async () => {
     claudeCancelBtn.disabled = true;
     try {
-      const r = await fetch('/setup/claude/cancel', { method: 'POST' });
+      const r = await fetch('/setup/claude/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ attemptId }) });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'cancel failed');
       if (claudeAuthWindow) claudeAuthWindow.close();
@@ -360,7 +447,7 @@ export function renderPage(): string {
       const r = await fetch('/setup/claude/code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code }),
+        body: JSON.stringify({ code, attemptId }),
       });
       claudeCodeInput.value = '';
       const data = await r.json();
@@ -397,20 +484,22 @@ export function renderPage(): string {
       const r = await fetch('/setup/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
+        body: JSON.stringify({ token, ...tokenTarget() }),
       });
       const data = await r.json();
       if (r.ok) {
         result.className = 'ok';
-        result.textContent = '適用しました: ' + (data.masked || '') + '\\n最終適用: ' + (data.lastApplied || '');
+        result.textContent = '検証・保存が完了しました。次の要求から反映されます。';
         document.getElementById('token').value = '';
+        await refreshAccounts();
       } else {
         result.className = 'err';
-        result.textContent = 'エラー: ' + (data.error || r.status);
+        result.textContent = 'エラー: ' + (explain(data.error) || r.status);
+        await refreshAccounts();
       }
     } catch (e) {
       result.className = 'err';
-      result.textContent = '通信エラー';
+      result.textContent = e.message || '通信エラー';
     } finally {
       btn.disabled = false;
     }
@@ -428,12 +517,20 @@ export function handleSetupPage(req: Request, res: Response): void {
 export function handleClaudeSetupTokenStart(req: Request, res: Response): void {
   if (!isSetupRequestAllowed(req)) return denyRemote(res);
 
-  const started = claudeSetupTokenFlow.start();
+  let target: TokenTarget | undefined;
+  try { target = tokenTarget(req.body); } catch (error) { return setupError(res, error); }
+  const store = getAccountStore();
+  const revision = store.view().revision;
+  const started = claudeSetupTokenFlow.start(target ? token => store.saveToken(target!, token) : token => {
+    if (store.view().revision !== revision || store.isPool()) throw new AccountError(409, "configuration_changed");
+    applyAuthToken(token);
+  });
   if (!started.started) {
     res.status(409).json({ error: "Claude認証はすでに進行中です" });
     return;
   }
-  const status = publicSetupTokenStatus(claudeSetupTokenFlow.status());
+  poolClaudeAttempt = Boolean(target);
+  const status = publicSetupTokenStatus({ ...claudeSetupTokenFlow.status(), attemptId: claudeSetupTokenFlow.getAttemptId() });
   if (status.state === "error") {
     res.status(503).json(status);
     return;
@@ -446,11 +543,12 @@ export function handleClaudeSetupTokenStatus(req: Request, res: Response): void 
   res
     .status(200)
     .set("Cache-Control", "no-store")
-    .json(publicSetupTokenStatus(claudeSetupTokenFlow.status()));
+    .json(publicSetupTokenStatus({ ...claudeSetupTokenFlow.status(), attemptId: claudeSetupTokenFlow.getAttemptId() }));
 }
 
 export function handleClaudeSetupTokenCancel(req: Request, res: Response): void {
   if (!isSetupRequestAllowed(req)) return denyRemote(res);
+  if (!matchesAttempt(req, res)) return;
   const result = claudeSetupTokenFlow.cancel();
   res.status(200).json({ state: "idle", ...result });
 }
@@ -458,6 +556,7 @@ export function handleClaudeSetupTokenCancel(req: Request, res: Response): void 
 export function handleClaudeSetupTokenCode(req: Request, res: Response): void {
   if (!isSetupRequestAllowed(req)) return denyRemote(res);
 
+  if (!matchesAttempt(req, res)) return;
   const code = (req.body && (req.body as any).code) as unknown;
   if (typeof code !== "string") {
     res.status(400).json({ error: "Claude認証コードを入力してください" });
@@ -485,21 +584,60 @@ export async function handleSetupToken(
     return;
   }
 
+  let target: TokenTarget | undefined;
+  try { target = tokenTarget(req.body); } catch (error) { return setupError(res, error); }
+  const store = getAccountStore();
+  const revision = store.view().revision;
   const verified = await verifyAuthToken(token);
   if (!verified.ok) {
     // 検証失敗: ファイルも env も共有クライアントも一切触らない（既存経路は無傷のまま）。
     const status =
-      verified.status === 401 || verified.status === 400 ? verified.status : 401;
+      verified.status === 429 ? 429 : verified.status === 401 || verified.status === 400 ? verified.status : 503;
     res.status(status).json({
-      error: `token verification failed (${verified.status ?? "no response"})`,
+      error: verified.status === 429 ? "現在検証できません（429）。後で再試行してください。" : `token verification failed (${verified.status ?? "no response"})`,
     });
     return;
   }
 
   // 検証成功時のみ: 永続化 → env 反映 → 共有クライアント破棄、の順で原子的に切り替える。
-  applyAuthToken(token);
-  resetClient();
+  try {
+    if (target) store.saveToken(target, token);
+    else {
+      if (store.view().revision !== revision || store.isPool()) throw new AccountError(409, "configuration_changed");
+      applyAuthToken(token);
+      resetClient();
+    }
+  } catch (error) { return setupError(res, error); }
 
   const { masked, lastApplied } = currentStatus();
-  res.status(200).json({ ok: true, masked, lastApplied });
+  res.status(200).json(target ? { ok: true, ...store.view() } : { ok: true, masked, lastApplied });
+}
+
+
+function setupError(res: Response, error: unknown): void {
+  res.status(error instanceof AccountError ? error.status : 503).json({ error: error instanceof AccountError ? error.code : "credential_save_failed" });
+}
+function tokenTarget(body: any): TokenTarget | undefined {
+  const store = getAccountStore();
+  store.assertValid();
+  if (body?.id !== undefined || body?.name !== undefined) {
+    const target = { id: body.id, name: body.name, generation: body.generation, expectedRevision: body.expectedRevision };
+    store.checkTarget(target); return target;
+  }
+  if (store.view().mode === "pool") throw new AccountError(400, "account_target_required");
+  return undefined;
+}
+function matchesAttempt(req: Request, res: Response): boolean {
+  if ((poolClaudeAttempt || req.body?.attemptId !== undefined) && req.body?.attemptId !== claudeSetupTokenFlow.getAttemptId()) {
+    res.status(409).json({ error: "authentication_attempt_changed" }); return false;
+  }
+  return true;
+}
+export function handleSetupAccounts(req: Request, res: Response): void {
+  if (!isSetupRequestAllowed(req)) return denyRemote(res);
+  try {
+    const store = getAccountStore();
+    if (req.method === "POST") store.mutate(req.body);
+    res.set("Cache-Control", "no-store").json(store.view());
+  } catch (error) { setupError(res, error); }
 }

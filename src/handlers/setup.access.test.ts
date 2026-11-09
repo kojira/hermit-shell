@@ -8,6 +8,7 @@ import {
   handleClaudeSetupTokenStart,
   handleClaudeSetupTokenStatus,
   handleSetupPage,
+  handleSetupAccounts,
   handleSetupToken,
   isAddressInCidr,
 } from "./setup";
@@ -129,7 +130,11 @@ test("every setup route rejects peers outside the allowed CIDR", async () => {
   handleClaudeSetupTokenCode(requestFrom(address, { code: "x" }), code);
   assert.equal(code.statusCode, 403);
 
-  for (const res of [page, token, start, status, cancel, code]) {
+  const accounts = mockResponse();
+  handleSetupAccounts(requestFrom(address, { action: "mode", mode: "pool" }), accounts);
+  assert.equal(accounts.statusCode, 403);
+
+  for (const res of [page, token, start, status, cancel, code, accounts]) {
     assert.deepEqual(res.body, { error: "forbidden" });
   }
 });

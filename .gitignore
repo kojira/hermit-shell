@@ -4,3 +4,6 @@ dist/
 *.log
 .hermit.pid
 .hermit-auth
+
+.hermit-accounts.json
+.hermit-accounts.json.tmp.*

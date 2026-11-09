@@ -7,6 +7,7 @@ import {
   handleClaudeSetupTokenStart,
   handleClaudeSetupTokenStatus,
   handleSetupPage,
+  handleSetupAccounts,
   handleSetupToken,
 } from "./handlers/setup";
 
@@ -28,6 +29,8 @@ app.post("/v1/chat/completions", handleChatCompletions);
 
 // 認証トークンの設定ページ（loopback と HERMIT_SETUP_ALLOW_CIDR のみ・setup.ts 内で 403 判定）
 app.get("/setup", handleSetupPage);
+app.get("/setup/accounts", handleSetupAccounts);
+app.post("/setup/accounts", handleSetupAccounts);
 app.post("/setup/token", handleSetupToken);
 app.post("/setup/claude/start", handleClaudeSetupTokenStart);
 app.post("/setup/claude/cancel", handleClaudeSetupTokenCancel);
